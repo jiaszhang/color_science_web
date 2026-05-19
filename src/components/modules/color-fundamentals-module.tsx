@@ -27,7 +27,7 @@ import {
   ResponsiveContainer,
   Legend,
 } from 'recharts';
-import { ArrowRight, Link, Unlock, Palette, Copy, Check } from 'lucide-react';
+import { ArrowRight, Link, Unlock, Palette, Copy, Check, Unlink, Link2 } from 'lucide-react';
 
 import { useAppStore } from '@/lib/store/app-store';
 import {
@@ -234,6 +234,25 @@ export default function ColorFundamentalsModule() {
   const [inputR, setInputR] = useState<number>(0.5);
   const [inputG, setInputG] = useState<number>(0.3);
   const [inputB, setInputB] = useState<number>(0.2);
+
+  // Bit-depth input mode for gamut conversion
+  type BitDepthMode = 'float' | '8bit' | '10bit';
+  const [inputBitDepth, setInputBitDepth] = useState<BitDepthMode>('float');
+  const bitDepthMax: Record<BitDepthMode, number> = { float: 1, '8bit': 255, '10bit': 1023 };
+  const bitDepthStep: Record<BitDepthMode, number> = { float: 0.01, '8bit': 1, '10bit': 1 };
+  const bitDepthLabel: Record<BitDepthMode, string> = {
+    float: '浮点 (0–1)',
+    '8bit': '8-bit (0–255)',
+    '10bit': '10-bit (0–1023)',
+  };
+  const toDisplayVal = (v: number, mode: BitDepthMode) => {
+    if (mode === 'float') return parseFloat(v.toFixed(4));
+    return Math.round(v * bitDepthMax[mode]);
+  };
+  const fromInputVal = (v: number, mode: BitDepthMode) => {
+    if (mode === 'float') return clamp(v, 0, 1);
+    return clamp(v / bitDepthMax[mode], 0, 1);
+  };
   const [conversionResult, setConversionResult] = useState<{
     outputRGB: Vec3;
     xyz: { X: number; Y: number; Z: number };
@@ -561,17 +580,32 @@ export default function ColorFundamentalsModule() {
 
                 {/* RGB Input */}
                 <div className="space-y-2">
-                  <Label className="text-xs font-medium">输入 RGB (0 ~ 1)</Label>
+                  <div className="flex items-center justify-between">
+                    <Label className="text-xs font-medium">输入 RGB</Label>
+                    <div className="flex gap-1">
+                      {(['float', '8bit', '10bit'] as BitDepthMode[]).map((mode) => (
+                        <Button
+                          key={mode}
+                          variant={inputBitDepth === mode ? 'default' : 'outline'}
+                          size="sm"
+                          className="h-6 px-2 text-[10px]"
+                          onClick={() => setInputBitDepth(mode)}
+                        >
+                          {bitDepthLabel[mode]}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
                   <div className="grid grid-cols-3 gap-2">
                     <div className="space-y-1">
                       <span className="text-[10px] font-medium text-red-500">R</span>
                       <Input
                         type="number"
                         min={0}
-                        max={1}
-                        step={0.01}
-                        value={inputR}
-                        onChange={(e) => setInputR(clamp(parseFloat(e.target.value) || 0, 0, 1))}
+                        max={bitDepthMax[inputBitDepth]}
+                        step={bitDepthStep[inputBitDepth]}
+                        value={toDisplayVal(inputR, inputBitDepth)}
+                        onChange={(e) => setInputR(fromInputVal(parseFloat(e.target.value) || 0, inputBitDepth))}
                         className="h-8 text-xs"
                       />
                     </div>
@@ -580,10 +614,10 @@ export default function ColorFundamentalsModule() {
                       <Input
                         type="number"
                         min={0}
-                        max={1}
-                        step={0.01}
-                        value={inputG}
-                        onChange={(e) => setInputG(clamp(parseFloat(e.target.value) || 0, 0, 1))}
+                        max={bitDepthMax[inputBitDepth]}
+                        step={bitDepthStep[inputBitDepth]}
+                        value={toDisplayVal(inputG, inputBitDepth)}
+                        onChange={(e) => setInputG(fromInputVal(parseFloat(e.target.value) || 0, inputBitDepth))}
                         className="h-8 text-xs"
                       />
                     </div>
@@ -592,10 +626,10 @@ export default function ColorFundamentalsModule() {
                       <Input
                         type="number"
                         min={0}
-                        max={1}
-                        step={0.01}
-                        value={inputB}
-                        onChange={(e) => setInputB(clamp(parseFloat(e.target.value) || 0, 0, 1))}
+                        max={bitDepthMax[inputBitDepth]}
+                        step={bitDepthStep[inputBitDepth]}
+                        value={toDisplayVal(inputB, inputBitDepth)}
+                        onChange={(e) => setInputB(fromInputVal(parseFloat(e.target.value) || 0, inputBitDepth))}
                         className="h-8 text-xs"
                       />
                     </div>
@@ -633,24 +667,27 @@ export default function ColorFundamentalsModule() {
 
                     {/* Output RGB */}
                     <div className="space-y-1.5">
-                      <Label className="text-xs font-medium">输出 RGB</Label>
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs font-medium">输出 RGB</Label>
+                        <span className="text-[10px] text-muted-foreground">{bitDepthLabel[inputBitDepth]}</span>
+                      </div>
                       <div className="grid grid-cols-3 gap-2">
                         <div className="rounded-md border bg-muted/30 px-3 py-1.5 text-center">
                           <span className="text-[10px] text-red-500 font-medium">R</span>
                           <p className="text-xs font-mono tabular-nums">
-                            {conversionResult.outputRGB[0].toFixed(6)}
+                            {inputBitDepth === 'float' ? conversionResult.outputRGB[0].toFixed(6) : toDisplayVal(clamp(conversionResult.outputRGB[0], 0, 1), inputBitDepth)}
                           </p>
                         </div>
                         <div className="rounded-md border bg-muted/30 px-3 py-1.5 text-center">
                           <span className="text-[10px] text-green-500 font-medium">G</span>
                           <p className="text-xs font-mono tabular-nums">
-                            {conversionResult.outputRGB[1].toFixed(6)}
+                            {inputBitDepth === 'float' ? conversionResult.outputRGB[1].toFixed(6) : toDisplayVal(clamp(conversionResult.outputRGB[1], 0, 1), inputBitDepth)}
                           </p>
                         </div>
                         <div className="rounded-md border bg-muted/30 px-3 py-1.5 text-center">
                           <span className="text-[10px] text-blue-500 font-medium">B</span>
                           <p className="text-xs font-mono tabular-nums">
-                            {conversionResult.outputRGB[2].toFixed(6)}
+                            {inputBitDepth === 'float' ? conversionResult.outputRGB[2].toFixed(6) : toDisplayVal(clamp(conversionResult.outputRGB[2], 0, 1), inputBitDepth)}
                           </p>
                         </div>
                       </div>

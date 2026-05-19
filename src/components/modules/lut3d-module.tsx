@@ -1449,7 +1449,7 @@ export default function Lut3dModule() {
               <CardHeader>
                 <CardTitle className="text-base">LUT 库</CardTitle>
                 <CardDescription>
-                  库中所有 LUT。选择一个 LUT 查看详情，或将两个 LUT 链接在一起。
+                  点击 LUT 项查看详情与色域调整，再次点击取消选择。
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -1462,78 +1462,83 @@ export default function Lut3dModule() {
                 )}
 
                 {lutEntries.length > 0 && (
-                  <div className="max-h-80 overflow-y-auto space-y-2 pr-1">
+                  <div className="max-h-[420px] overflow-y-auto space-y-2 pr-1">
                     {lutEntries.map((entry) => (
                       <div
                         key={entry.id}
-                        className={`flex items-center justify-between rounded-lg border p-3 transition-colors ${
+                        className={`flex items-center justify-between rounded-lg border p-3 transition-colors cursor-pointer select-none ${
                           manageInfoLutId === entry.id ? 'border-primary bg-primary/5' : 'hover:bg-muted/30'
                         }`}
+                        onClick={() => {
+                          // Toggle: click again to deselect and hide gamut adjustment
+                          if (manageInfoLutId === entry.id) {
+                            setManageInfoLutId('');
+                          } else {
+                            setManageInfoLutId(entry.id);
+                          }
+                        }}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          setEditingLutId(entry.id);
+                          setEditingName(entry.name);
+                        }}
                       >
                         <div className="flex items-center gap-3 min-w-0">
-                          <button
-                            onClick={() => setManageInfoLutId(entry.id)}
-                            onDoubleClick={() => {
-                              setEditingLutId(entry.id);
-                              setEditingName(entry.name);
-                            }}
-                            className="flex items-center gap-3 min-w-0 text-left"
-                          >
-                            <div className="w-2 h-2 rounded-full bg-primary flex-shrink-0" />
-                            <div className="min-w-0">
-                              {editingLutId === entry.id ? (
-                                <input
-                                  type="text"
-                                  value={editingName}
-                                  onChange={(e) => setEditingName(e.target.value)}
-                                  onBlur={() => {
+                          <div className="w-2.5 h-2.5 rounded-full bg-primary flex-shrink-0" />
+                          <div className="min-w-0">
+                            {editingLutId === entry.id ? (
+                              <input
+                                type="text"
+                                value={editingName}
+                                onChange={(e) => setEditingName(e.target.value)}
+                                onBlur={() => {
+                                  const trimmed = editingName.trim();
+                                  if (trimmed && trimmed !== entry.name) {
+                                    renameLUT(entry.id, trimmed);
+                                  }
+                                  setEditingLutId(null);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
                                     const trimmed = editingName.trim();
                                     if (trimmed && trimmed !== entry.name) {
                                       renameLUT(entry.id, trimmed);
                                     }
                                     setEditingLutId(null);
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') {
-                                      const trimmed = editingName.trim();
-                                      if (trimmed && trimmed !== entry.name) {
-                                        renameLUT(entry.id, trimmed);
-                                      }
-                                      setEditingLutId(null);
-                                    }
-                                    if (e.key === 'Escape') {
-                                      setEditingLutId(null);
-                                    }
-                                  }}
-                                  autoFocus
-                                  className="text-sm font-medium bg-muted border rounded px-1.5 py-0 w-full max-w-[200px] focus:outline-none focus:ring-1 focus:ring-primary"
-                                />
-                              ) : (
-                                <p className="text-sm font-medium truncate">{entry.name}</p>
-                              )}
-                              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                                <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
-                                  {entry.size}&sup3;
-                                </Badge>
-                                {entry.srcGamut && <span>{entry.srcGamut}</span>}
-                                {entry.srcGamut && entry.dstGamut && <span>&rarr;</span>}
-                                {entry.dstGamut && <span>{entry.dstGamut}</span>}
-                              </div>
-                              {entry.createdAt && (
-                                <div className="text-[10px] text-muted-foreground/60 mt-0.5">
-                                  {new Date(entry.createdAt).toLocaleString('zh-CN', {
-                                    month: '2-digit',
-                                    day: '2-digit',
-                                    hour: '2-digit',
-                                    minute: '2-digit',
-                                    second: '2-digit',
-                                  })}
-                                </div>
-                              )}
+                                  }
+                                  if (e.key === 'Escape') {
+                                    setEditingLutId(null);
+                                  }
+                                }}
+                                autoFocus
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-sm font-medium bg-muted border rounded px-1.5 py-0.5 w-full max-w-[200px] focus:outline-none focus:ring-1 focus:ring-primary"
+                              />
+                            ) : (
+                              <p className="text-sm font-medium truncate">{entry.name}</p>
+                            )}
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                                {entry.size}&sup3;
+                              </Badge>
+                              {entry.srcGamut && <span>{entry.srcGamut}</span>}
+                              {entry.srcGamut && entry.dstGamut && <span>&rarr;</span>}
+                              {entry.dstGamut && <span>{entry.dstGamut}</span>}
                             </div>
-                          </button>
+                            {entry.createdAt && (
+                              <div className="text-[10px] text-muted-foreground/60 mt-0.5">
+                                {new Date(entry.createdAt).toLocaleString('zh-CN', {
+                                  month: '2-digit',
+                                  day: '2-digit',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                })}
+                              </div>
+                            )}
+                          </div>
                         </div>
-                        <div className="flex items-center gap-1 flex-shrink-0">
+                        <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
                           <Button
                             variant="ghost"
                             size="sm"
@@ -1557,35 +1562,6 @@ export default function Lut3dModule() {
                       </div>
                     ))}
                   </div>
-                )}
-
-                {/* Chain LUTs */}
-                {lutEntries.length >= 2 && (
-                  <>
-                    <Separator />
-                    <div className="space-y-3">
-                      <Label className="text-sm font-medium flex items-center gap-2">
-                        <Link2 className="w-4 h-4" />
-                        链接 LUT
-                      </Label>
-                      <p className="text-xs text-muted-foreground">
-                        先应用 LUT1，再应用 LUT2。创建一个新的组合 LUT。
-                      </p>
-                      <div className="grid grid-cols-2 gap-3">
-                        {renderLutSelector('LUT 1（第一个）', chainLut1Id, setChainLut1Id)}
-                        {renderLutSelector('LUT 2（第二个）', chainLut2Id, setChainLut2Id)}
-                      </div>
-                      <Button
-                        onClick={handleChain}
-                        disabled={!chainLut1Id || !chainLut2Id || chainLut1Id === chainLut2Id}
-                        variant="secondary"
-                        className="w-full"
-                      >
-                        <Link2 className="w-4 h-4 mr-2" />
-                        链接 LUT
-                      </Button>
-                    </div>
-                  </>
                 )}
 
                 {/* Feature 2: Gamut Adjustment — only shown when a LUT is selected */}
@@ -1700,7 +1676,7 @@ export default function Lut3dModule() {
               </CardContent>
             </Card>
 
-            {/* LUT Details Panel */}
+            {/* Right sidebar: LUT Details + Chain LUT */}
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">LUT 详情</CardTitle>
@@ -1708,7 +1684,7 @@ export default function Lut3dModule() {
               <CardContent>
                 {!manageInfoLutId && (
                   <div className="text-center text-muted-foreground py-8">
-                    <p className="text-sm">选择一个 LUT 查看详情。</p>
+                    <p className="text-sm">点击左侧 LUT 查看详情。</p>
                   </div>
                 )}
 
@@ -1784,6 +1760,35 @@ export default function Lut3dModule() {
                       </div>
                     );
                   })()
+                )}
+
+                {/* Chain LUTs — moved to sidebar */}
+                {lutEntries.length >= 2 && (
+                  <>
+                    <Separator className="my-4" />
+                    <div className="space-y-3">
+                      <Label className="text-sm font-medium flex items-center gap-2">
+                        <Link2 className="w-4 h-4" />
+                        链接 LUT
+                      </Label>
+                      <p className="text-xs text-muted-foreground">
+                        先应用 LUT1，再应用 LUT2，创建组合 LUT。
+                      </p>
+                      <div className="space-y-2">
+                        {renderLutSelector('LUT 1', chainLut1Id, setChainLut1Id)}
+                        {renderLutSelector('LUT 2', chainLut2Id, setChainLut2Id)}
+                      </div>
+                      <Button
+                        onClick={handleChain}
+                        disabled={!chainLut1Id || !chainLut2Id || chainLut1Id === chainLut2Id}
+                        variant="secondary"
+                        className="w-full"
+                      >
+                        <Link2 className="w-4 h-4 mr-2" />
+                        链接 LUT
+                      </Button>
+                    </div>
+                  </>
                 )}
               </CardContent>
             </Card>
