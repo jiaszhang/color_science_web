@@ -217,6 +217,8 @@ export default function Lut3dModule() {
   const [xyLvImportText, setXyLvImportText] = useState('');
   const [xyLvParseError, setXyLvParseError] = useState('');
   const [isXyLvUpsampling, setIsXyLvUpsampling] = useState(false);
+  const [xyLvConvertSuccess, setXyLvConvertSuccess] = useState(false);
+  const [xyLvConvertError, setXyLvConvertError] = useState('');
   const xyLvFileRef = useRef<HTMLInputElement>(null);
 
   const gamutNames = getGamutNames();
@@ -694,14 +696,57 @@ export default function Lut3dModule() {
     requestAnimationFrame(() => {
       setTimeout(() => {
         try {
+          // Auto-detect R, G, B scale from input data
+          // Collect unique R, G, B values to determine the grid spacing
+          const rValues = new Set<number>();
+          const gValues = new Set<number>();
+          const bValues = new Set<number>();
+          for (let i = 0; i < 125; i++) {
+            rValues.add(xyLvData5[i * 6 + 0]);
+            gValues.add(xyLvData5[i * 6 + 1]);
+            bValues.add(xyLvData5[i * 6 + 2]);
+          }
+
+          // Determine the scale: find max value to decide if data is 0-1 or 0-4 etc.
+          const maxRGB = Math.max(
+            ...Array.from(rValues), ...Array.from(gValues), ...Array.from(bValues)
+          );
+          // Grid index for a 5³ grid: round to nearest index (0-4)
+          const toGridIdx = (val: number): number => {
+            if (maxRGB <= 1) {
+              // Normalized 0-1: map to 0-4
+              return Math.round(val * 4);
+            } else {
+              // Already in index form (0-4 or similar)
+              return Math.round(val);
+            }
+          };
+
+          // Normalize to 0-1 for LUT grid coordinates
+          const toNorm = (val: number): number => {
+            if (maxRGB <= 1) return val;
+            return val / maxRGB;
+          };
+
           // Create three separate 5³ LUTs for x, y, Lv channels
+          // Use R, G, B values from input to place data at correct grid positions
           const makeLut5 = (channelOffset: number): LUT3D => {
             const data = new Float32Array(125 * 3);
+            // Fill with NaN to detect unmapped positions
+            data.fill(NaN);
             for (let i = 0; i < 125; i++) {
+              const ri = clamp(toGridIdx(xyLvData5[i * 6 + 0]), 0, 4);
+              const gi = clamp(toGridIdx(xyLvData5[i * 6 + 1]), 0, 4);
+              const bi = clamp(toGridIdx(xyLvData5[i * 6 + 2]), 0, 4);
               const val = xyLvData5[i * 6 + channelOffset];
-              data[i * 3 + 0] = val;
-              data[i * 3 + 1] = val;
-              data[i * 3 + 2] = val;
+              const idx = (bi * 5 * 5 + gi * 5 + ri) * 3;
+              data[idx + 0] = val;
+              data[idx + 1] = val;
+              data[idx + 2] = val;
+            }
+            // Fill any unmapped positions with 0
+            for (let i = 0; i < data.length; i++) {
+              if (isNaN(data[i])) data[i] = 0;
             }
             return {
               name: `xyLv ch${channelOffset}`,
@@ -716,25 +761,32 @@ export default function Lut3dModule() {
           const lutY = makeLut5(4);
           const lutLv = makeLut5(5);
 
-          // Upsample each to 17³
+          // Upsample each to 17³ (no normalization of x, y, Lv values)
           const upX = upsampleLUT(lutX, 17);
           const upY = upsampleLUT(lutY, 17);
           const upLv = upsampleLUT(lutLv, 17);
 
           // Combine back: for each 17³ entry, reconstruct R,G,B,x,y,Lv
-          // Input grid positions for 17³
+          // Use original (non-normalized) R, G, B values for the grid positions
           const upData = new Float32Array(4913 * 6);
           for (let b = 0; b < 17; b++) {
             for (let g = 0; g < 17; g++) {
               for (let r = 0; r < 17; r++) {
                 const lutIdx = (b * 17 * 17 + g * 17 + r) * 3;
                 const outIdx = (b * 17 * 17 + g * 17 + r) * 6;
-                upData[outIdx + 0] = r / 16; // R input grid position
-                upData[outIdx + 1] = g / 16; // G input grid position
-                upData[outIdx + 2] = b / 16; // B input grid position
-                upData[outIdx + 3] = upX.data[lutIdx]; // x (interpolated)
-                upData[outIdx + 4] = upY.data[lutIdx]; // y (interpolated)
-                upData[outIdx + 5] = upLv.data[lutIdx]; // Lv (interpolated)
+                // Store original-scale grid coordinates (not normalized to 0-1)
+                if (maxRGB <= 1) {
+                  upData[outIdx + 0] = r / 16;
+                  upData[outIdx + 1] = g / 16;
+                  upData[outIdx + 2] = b / 16;
+                } else {
+                  upData[outIdx + 0] = (r / 16) * maxRGB;
+                  upData[outIdx + 1] = (g / 16) * maxRGB;
+                  upData[outIdx + 2] = (b / 16) * maxRGB;
+                }
+                upData[outIdx + 3] = upX.data[lutIdx]; // x (interpolated, not normalized)
+                upData[outIdx + 4] = upY.data[lutIdx]; // y (interpolated, not normalized)
+                upData[outIdx + 5] = upLv.data[lutIdx]; // Lv (interpolated, not normalized)
               }
             }
           }
@@ -753,26 +805,34 @@ export default function Lut3dModule() {
     const total = size * size * size;
     const lutData = new Float32Array(total * 3);
 
-    for (let i = 0; i < total; i++) {
-      const x = srcData[i * 6 + 3];
-      const y = srcData[i * 6 + 4];
-      const Lv = srcData[i * 6 + 5];
-      const [r, g, b] = xyYToRgb(x, y, Lv, xyLvGamut, xyLvTF);
-      lutData[i * 3 + 0] = clamp(r, 0, 1);
-      lutData[i * 3 + 1] = clamp(g, 0, 1);
-      lutData[i * 3 + 2] = clamp(b, 0, 1);
-    }
+    setXyLvConvertError('');
+    try {
+      for (let i = 0; i < total; i++) {
+        const x = srcData[i * 6 + 3];
+        const y = srcData[i * 6 + 4];
+        const Lv = srcData[i * 6 + 5];
+        const [r, g, b] = xyYToRgb(x, y, Lv, xyLvGamut, xyLvTF);
+        lutData[i * 3 + 0] = clamp(r, 0, 1);
+        lutData[i * 3 + 1] = clamp(g, 0, 1);
+        lutData[i * 3 + 2] = clamp(b, 0, 1);
+      }
 
-    const id = generateId();
-    const name = `xyLv→RGB ${xyLvGamut}/${xyLvTF} [${size}³]`;
-    addLUT(id, {
-      name,
-      size,
-      data: lutData,
-      dstGamut: xyLvGamut,
-    });
-    setApplySelectedLutId(id);
-    setExportSelectedLutId(id);
+      const id = generateId();
+      const name = `xyLv→RGB ${xyLvGamut}/${xyLvTF} [${size}³]`;
+      addLUT(id, {
+        name,
+        size,
+        data: lutData,
+        dstGamut: xyLvGamut,
+      });
+      setApplySelectedLutId(id);
+      setExportSelectedLutId(id);
+      setXyLvConvertSuccess(true);
+      setTimeout(() => setXyLvConvertSuccess(false), 3000);
+    } catch (err) {
+      setXyLvConvertError(err instanceof Error ? err.message : '转换失败');
+      setTimeout(() => setXyLvConvertError(''), 5000);
+    }
   }, [xyLvData5, xyLvUpData17, xyLvGamut, xyLvTF, addLUT]);
 
   const handleXyLvExport = useCallback(() => {
@@ -2564,40 +2624,59 @@ export default function Lut3dModule() {
 
                 <Separator />
 
-                {/* Preview section */}
+                {/* Preview section - fixed height with scroll */}
                 <div className="space-y-2">
                   <Label className="text-sm font-medium">数据预览</Label>
-                  {xyLvData5 ? (
-                    <div className="rounded-md border p-3 space-y-1.5 text-xs bg-muted/20">
-                      <div className="flex items-center gap-2">
-                        <Check className="w-4 h-4 text-green-500" />
-                        <span className="font-medium text-green-700">5³ xyLv 数据已导入</span>
+                  <div className="max-h-48 overflow-y-auto rounded-md border">
+                    {xyLvData5 ? (
+                      <div className="p-3 space-y-1.5 text-xs bg-muted/20">
+                        <div className="flex items-center gap-2">
+                          <Check className="w-4 h-4 text-green-500" />
+                          <span className="font-medium text-green-700">5³ xyLv 数据已导入</span>
+                        </div>
+                        <div className="text-muted-foreground">
+                          <span>125 行 × 6 列 (R,G,B,x,y,Lv)</span>
+                        </div>
+                        {(() => {
+                          let minX = Infinity, maxX = -Infinity;
+                          let minY = Infinity, maxY = -Infinity;
+                          let minLv = Infinity, maxLv = -Infinity;
+                          for (let i = 0; i < 125; i++) {
+                            const xv = xyLvData5[i * 6 + 3];
+                            const yv = xyLvData5[i * 6 + 4];
+                            const lv = xyLvData5[i * 6 + 5];
+                            if (xv < minX) minX = xv; if (xv > maxX) maxX = xv;
+                            if (yv < minY) minY = yv; if (yv > maxY) maxY = yv;
+                            if (lv < minLv) minLv = lv; if (lv > maxLv) maxLv = lv;
+                          }
+                          return (
+                            <>
+                              <div className="text-muted-foreground">
+                                <span>x 范围: [{minX.toFixed(4)}, {maxX.toFixed(4)}]</span>
+                              </div>
+                              <div className="text-muted-foreground">
+                                <span>y 范围: [{minY.toFixed(4)}, {maxY.toFixed(4)}]</span>
+                              </div>
+                              <div className="text-muted-foreground">
+                                <span>Lv 范围: [{minLv.toFixed(4)}, {maxLv.toFixed(4)}]</span>
+                              </div>
+                            </>
+                          );
+                        })()}
                       </div>
-                      <div className="text-muted-foreground">
-                        <span>125 行 × 6 列 (R,G,B,x,y,Lv)</span>
+                    ) : (
+                      <div className="p-3 text-xs text-muted-foreground">尚未导入数据</div>
+                    )}
+                    {xyLvUpData17 && (
+                      <div className="p-3 space-y-1 text-xs bg-green-50 border-t border-green-200">
+                        <div className="flex items-center gap-2 text-green-700">
+                          <Check className="w-4 h-4" />
+                          <span className="font-medium">17³ 上采样数据已就绪</span>
+                        </div>
+                        <span className="text-muted-foreground">4,913 行 × 6 列</span>
                       </div>
-                      <div className="text-muted-foreground">
-                        <span>x 范围: [{Math.min(...Array.from({ length: 125 }, (_, i) => xyLvData5[i * 6 + 3])).toFixed(4)}, {Math.max(...Array.from({ length: 125 }, (_, i) => xyLvData5[i * 6 + 3])).toFixed(4)}]</span>
-                      </div>
-                      <div className="text-muted-foreground">
-                        <span>y 范围: [{Math.min(...Array.from({ length: 125 }, (_, i) => xyLvData5[i * 6 + 4])).toFixed(4)}, {Math.max(...Array.from({ length: 125 }, (_, i) => xyLvData5[i * 6 + 4])).toFixed(4)}]</span>
-                      </div>
-                      <div className="text-muted-foreground">
-                        <span>Lv 范围: [{Math.min(...Array.from({ length: 125 }, (_, i) => xyLvData5[i * 6 + 5])).toFixed(4)}, {Math.max(...Array.from({ length: 125 }, (_, i) => xyLvData5[i * 6 + 5])).toFixed(4)}]</span>
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">尚未导入数据</p>
-                  )}
-                  {xyLvUpData17 && (
-                    <div className="rounded-md border p-3 space-y-1 text-xs bg-green-50 border-green-200">
-                      <div className="flex items-center gap-2 text-green-700">
-                        <Check className="w-4 h-4" />
-                        <span className="font-medium">17³ 上采样数据已就绪</span>
-                      </div>
-                      <span className="text-muted-foreground">4,913 行 × 6 列</span>
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
 
                 <Separator />
@@ -2682,9 +2761,30 @@ export default function Lut3dModule() {
                     disabled={!xyLvData5 && !xyLvUpData17}
                     className="w-full gap-2"
                   >
-                    <Wand2 className="w-4 h-4" />
-                    转换并添加到 LUT 库
+                    {xyLvConvertSuccess ? (
+                      <>
+                        <Check className="w-4 h-4" />
+                        已添加到 LUT 库
+                      </>
+                    ) : (
+                      <>
+                        <Wand2 className="w-4 h-4" />
+                        转换并添加到 LUT 库
+                      </>
+                    )}
                   </Button>
+                  {xyLvConvertSuccess && (
+                    <div className="flex items-center gap-2 p-2.5 rounded-lg text-xs bg-green-50 border border-green-200 text-green-700">
+                      <Check className="w-4 h-4 flex-shrink-0" />
+                      3DLUT 已成功添加到库中，可在「LUT 应用」和「LUT 导出」中使用
+                    </div>
+                  )}
+                  {xyLvConvertError && (
+                    <div className="flex items-center gap-2 p-2.5 rounded-lg text-xs bg-destructive/10 border border-destructive/20 text-destructive">
+                      <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                      {xyLvConvertError}
+                    </div>
+                  )}
                   <p className="text-[10px] text-muted-foreground">
                     将使用 {(xyLvUpData17 ? 17 : xyLvData5 ? 5 : 0)}³ 数据进行转换
                   </p>
