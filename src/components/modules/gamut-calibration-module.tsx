@@ -11,7 +11,6 @@ import { Separator } from '@/components/ui/separator';
 import { Slider } from '@/components/ui/slider';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { useAppStore } from '@/lib/store/app-store';
 import {
   STANDARD_GAMUTS,
@@ -89,9 +88,9 @@ export default function GamutCalibrationModule() {
   const bitDepthMax: Record<BitDepthMode, number> = { float: 1, '8bit': 255, '10bit': 1023 };
   const bitDepthStep: Record<BitDepthMode, number> = { float: 0.01, '8bit': 1, '10bit': 1 };
   const bitDepthLabel: Record<BitDepthMode, string> = {
-    float: '归一化浮点',
-    '8bit': '8-bit',
-    '10bit': '10-bit',
+    float: '浮点 (0–1)',
+    '8bit': '8-bit (0–255)',
+    '10bit': '10-bit (0–1023)',
   };
   const toDisplayVal = (v: number, mode: BitDepthMode) => {
     if (mode === 'float') return parseFloat(v.toFixed(4));
@@ -313,11 +312,19 @@ export default function GamutCalibrationModule() {
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <Label className="text-xs">输入 RGB</Label>
-                    <ToggleGroup type="single" value={inputBitDepth} onValueChange={(v) => { if (v) setInputBitDepth(v as BitDepthMode); }} className="h-7">
-                      <ToggleGroupItem value="float" className="text-[10px] px-2 h-7">浮点</ToggleGroupItem>
-                      <ToggleGroupItem value="8bit" className="text-[10px] px-2 h-7">8bit</ToggleGroupItem>
-                      <ToggleGroupItem value="10bit" className="text-[10px] px-2 h-7">10bit</ToggleGroupItem>
-                    </ToggleGroup>
+                    <div className="flex gap-1">
+                      {(['float', '8bit', '10bit'] as BitDepthMode[]).map((mode) => (
+                        <Button
+                          key={mode}
+                          variant={inputBitDepth === mode ? 'default' : 'outline'}
+                          size="sm"
+                          className="h-6 px-2 text-[10px]"
+                          onClick={() => setInputBitDepth(mode)}
+                        >
+                          {bitDepthLabel[mode]}
+                        </Button>
+                      ))}
+                    </div>
                   </div>
                   <div className="grid grid-cols-3 gap-2">
                     <div>
@@ -404,12 +411,30 @@ export default function GamutCalibrationModule() {
                         <span>Z: {convertResult.xyz.Z.toFixed(6)}</span>
                       </div>
                     </div>
-                    <div className="rounded-lg bg-muted/50 p-3 space-y-1.5">
-                      <p className="text-xs font-medium">目标 RGB ({bitDepthLabel[inputBitDepth]})</p>
-                      <div className="grid grid-cols-3 gap-2 text-xs font-mono">
-                        <span className="text-red-500">R: {inputBitDepth === 'float' ? convertResult.outRgb[0].toFixed(6) : toDisplayVal(Math.max(0, Math.min(1, convertResult.outRgb[0])), inputBitDepth)}</span>
-                        <span className="text-green-500">G: {inputBitDepth === 'float' ? convertResult.outRgb[1].toFixed(6) : toDisplayVal(Math.max(0, Math.min(1, convertResult.outRgb[1])), inputBitDepth)}</span>
-                        <span className="text-blue-500">B: {inputBitDepth === 'float' ? convertResult.outRgb[2].toFixed(6) : toDisplayVal(Math.max(0, Math.min(1, convertResult.outRgb[2])), inputBitDepth)}</span>
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-medium">输出 RGB</p>
+                        <span className="text-[10px] text-muted-foreground">{bitDepthLabel[inputBitDepth]}</span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        <div className="rounded-md border bg-muted/30 px-3 py-1.5 text-center">
+                          <span className="text-[10px] text-red-500 font-medium">R</span>
+                          <p className="text-xs font-mono tabular-nums">
+                            {inputBitDepth === 'float' ? convertResult.outRgb[0].toFixed(6) : toDisplayVal(Math.max(0, Math.min(1, convertResult.outRgb[0])), inputBitDepth)}
+                          </p>
+                        </div>
+                        <div className="rounded-md border bg-muted/30 px-3 py-1.5 text-center">
+                          <span className="text-[10px] text-green-500 font-medium">G</span>
+                          <p className="text-xs font-mono tabular-nums">
+                            {inputBitDepth === 'float' ? convertResult.outRgb[1].toFixed(6) : toDisplayVal(Math.max(0, Math.min(1, convertResult.outRgb[1])), inputBitDepth)}
+                          </p>
+                        </div>
+                        <div className="rounded-md border bg-muted/30 px-3 py-1.5 text-center">
+                          <span className="text-[10px] text-blue-500 font-medium">B</span>
+                          <p className="text-xs font-mono tabular-nums">
+                            {inputBitDepth === 'float' ? convertResult.outRgb[2].toFixed(6) : toDisplayVal(Math.max(0, Math.min(1, convertResult.outRgb[2])), inputBitDepth)}
+                          </p>
+                        </div>
                       </div>
                     </div>
                     <div className="rounded-lg bg-muted/50 p-3 space-y-1.5">

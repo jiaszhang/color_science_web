@@ -41,3 +41,24 @@ Stage Summary:
 - Color fundamentals gamut conversion now supports float/8bit/10bit input modes
 - LUT management: whole row clickable, click-again-to-deselect, gamut adjustment toggles with selection
 - Link LUT moved to sidebar position
+
+---
+Task ID: 3
+Agent: Main Agent
+Task: Make 色域转换计算 bit depth selection match 色彩基础 色域转换 style
+
+Work Log:
+- Updated gamut-calibration-module.tsx bit depth labels to match color-fundamentals-module.tsx:
+  - '归一化浮点' → '浮点 (0–1)'
+  - '8-bit' → '8-bit (0–255)'
+  - '10-bit' → '10-bit (0–1023)'
+- Replaced ToggleGroup UI component with Button components (same style as color-fundamentals)
+- Updated output RGB section to use card-style display with individual bordered boxes per channel (matching color-fundamentals layout)
+- Added bit depth label display next to "输出 RGB" header
+- Removed unused ToggleGroup/ToggleGroupItem import
+- Verified no lint errors in modified file
+
+Stage Summary:
+- Modified file: src/components/modules/gamut-calibration-module.tsx
+- The 色域转换计算 bit depth selection now has the same UI style and effect as 色彩基础 色域转换
+- Button-style toggle with descriptive labels, card-style output display
