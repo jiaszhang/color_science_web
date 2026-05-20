@@ -15,7 +15,7 @@ import {
   type LUT3D,
 } from '@/lib/color-science/lut3d';
 import { getGamutNames, getTransferFunctionNames, type TransferFunctionName } from '@/lib/color-science';
-import { xyYToRgb } from '@/lib/color-science/transform';
+import { xyYToXYZ, xyzToLinearRgb, linearToRgb } from '@/lib/color-science/transform';
 import { useAppStore } from '@/lib/store/app-store';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -831,7 +831,6 @@ export default function Lut3dModule() {
     if (!srcData) return;
     const size = srcData === xyLvUpData17 ? 17 : 5;
     const total = size * size * size;
-    const lutData = new Float32Array(total * 3);
 
     setXyLvConvertError('');
     try {
@@ -840,6 +839,10 @@ export default function Lut3dModule() {
       for (let i = 0; i < total; i++) {
         maxCoord = Math.max(maxCoord, srcData[i * 6 + 0], srcData[i * 6 + 1], srcData[i * 6 + 2]);
       }
+
+      // ── Step 1: xyLv → XYZ → linear RGB (no TF encoding yet) ──
+      const linearRgbArray = new Float32Array(total * 3);
+      let maxLinear = 0;
 
       for (let i = 0; i < total; i++) {
         const r = srcData[i * 6 + 0];
@@ -857,10 +860,43 @@ export default function Lut3dModule() {
         // LUT3D internal storage: (bi * size² + gi * size + ri) * 3
         const lutIdx = (bi * size * size + gi * size + ri) * 3;
 
-        const [outR, outG, outB] = xyYToRgb(x, y, Lv, xyLvGamut, xyLvTF);
-        lutData[lutIdx + 0] = clamp(outR, 0, 1);
-        lutData[lutIdx + 1] = clamp(outG, 0, 1);
-        lutData[lutIdx + 2] = clamp(outB, 0, 1);
+        // xyLv → XYZ: X = (x/y)*Lv, Y = Lv, Z = ((1-x-y)/y)*Lv
+        const { X, Y: Yv, Z } = xyYToXYZ(x, y, Lv);
+
+        // XYZ → linear RGB (no transfer function)
+        const [lr, lg, lb] = xyzToLinearRgb(X, Yv, Z, xyLvGamut);
+
+        linearRgbArray[lutIdx + 0] = lr;
+        linearRgbArray[lutIdx + 1] = lg;
+        linearRgbArray[lutIdx + 2] = lb;
+
+        maxLinear = Math.max(maxLinear, lr, lg, lb);
+      }
+
+      // ── Step 2: Normalize linear RGB to 0-1 by dividing by max ──
+      if (maxLinear <= 0) maxLinear = 1; // avoid division by zero
+      for (let i = 0; i < linearRgbArray.length; i++) {
+        linearRgbArray[i] = linearRgbArray[i] / maxLinear;
+      }
+
+      // ── Step 3: Apply transfer function (OETF) to get non-linear RGB ──
+      const lutData = new Float32Array(total * 3);
+      for (let i = 0; i < total; i++) {
+        const lr = linearRgbArray[i * 3 + 0];
+        const lg = linearRgbArray[i * 3 + 1];
+        const lb = linearRgbArray[i * 3 + 2];
+
+        // Apply OETF: linear → non-linear RGB
+        const [nr, ng, nb] = linearToRgb(
+          clamp(lr, 0, 1),
+          clamp(lg, 0, 1),
+          clamp(lb, 0, 1),
+          xyLvTF
+        );
+
+        lutData[i * 3 + 0] = clamp(nr, 0, 1);
+        lutData[i * 3 + 1] = clamp(ng, 0, 1);
+        lutData[i * 3 + 2] = clamp(nb, 0, 1);
       }
 
       const id = generateId();

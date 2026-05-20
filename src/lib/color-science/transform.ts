@@ -105,18 +105,28 @@ export function rgbToXYZ(r: number, g: number, b: number, gamut: string, tf: Tra
 }
 
 /**
+ * Convert XYZ to linear RGB (no transfer function encoding)
+ * @param X,Y,Z - XYZ color values
+ * @param gamut - Target color space
+ * @returns Vec3 of linear RGB values (may be outside 0-1 range)
+ */
+export function xyzToLinearRgb(X: number, Y: number, Z: number, gamut: string): Vec3 {
+  const matrix = getXYZToRGB(gamut);
+  return [
+    matrix[0][0] * X + matrix[0][1] * Y + matrix[0][2] * Z,
+    matrix[1][0] * X + matrix[1][1] * Y + matrix[1][2] * Z,
+    matrix[2][0] * X + matrix[2][1] * Y + matrix[2][2] * Z,
+  ];
+}
+
+/**
  * Convert XYZ to RGB
  * @param xyz - XYZ color values
  * @param gamut - Target color space
  * @param tf - Target transfer function
  */
 export function xyzToRgb(X: number, Y: number, Z: number, gamut: string, tf: TransferFunctionName, gamma = 2.2): Vec3 {
-  const matrix = getXYZToRGB(gamut);
-  const rgb = [
-    matrix[0][0] * X + matrix[0][1] * Y + matrix[0][2] * Z,
-    matrix[1][0] * X + matrix[1][1] * Y + matrix[1][2] * Z,
-    matrix[2][0] * X + matrix[2][1] * Y + matrix[2][2] * Z,
-  ];
+  const rgb = xyzToLinearRgb(X, Y, Z, gamut);
   // Encode with transfer function
   return linearToRgb(rgb[0], rgb[1], rgb[2], tf, gamma);
 }
