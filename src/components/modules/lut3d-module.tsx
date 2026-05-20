@@ -2842,7 +2842,7 @@ export default function Lut3dModule() {
                   </div>
                   <Button
                     onClick={handleXyLvToRGB}
-                    disabled={!xyLvData5 && !xyLvUpData17}
+                    disabled={!xyLvUpData17}
                     className="w-full gap-2"
                   >
                     {xyLvConvertSuccess ? (
@@ -2870,7 +2870,7 @@ export default function Lut3dModule() {
                     </div>
                   )}
                   <p className="text-[10px] text-muted-foreground">
-                    将使用 {(xyLvUpData17 ? 17 : xyLvData5 ? 5 : 0)}³ 数据进行转换
+                    将使用 17³ 上采样数据进行转换
                   </p>
                 </div>
 
