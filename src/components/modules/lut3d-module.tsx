@@ -15,7 +15,7 @@ import {
   type LUT3D,
 } from '@/lib/color-science/lut3d';
 import { getGamutNames, getTransferFunctionNames, type TransferFunctionName } from '@/lib/color-science';
-import { xyYToXYZ, xyzToLinearRgb, linearToRgb } from '@/lib/color-science/transform';
+import { xyYToXYZ, xyzToRgb, linearToRgb } from '@/lib/color-science/transform';
 import { useAppStore } from '@/lib/store/app-store';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -857,7 +857,8 @@ export default function Lut3dModule() {
         maxCoord = Math.max(maxCoord, srcData[i * 6 + 0], srcData[i * 6 + 1], srcData[i * 6 + 2]);
       }
 
-      // ── Step 1: xyLv → XYZ → linear RGB (no TF encoding yet) ──
+      // ── Step 1: xyLv → XYZ → linear RGB ──
+      // Use xyzToRgb with tf='linear' to get linear RGB (no OETF encoding)
       const linearRgbArray = new Float32Array(total * 3);
       let maxLinear = 0;
 
@@ -880,8 +881,8 @@ export default function Lut3dModule() {
         // xyLv → XYZ: X = (x/y)*Lv, Y = Lv, Z = ((1-x-y)/y)*Lv
         const { X, Y: Yv, Z } = xyYToXYZ(x, y, Lv);
 
-        // XYZ → linear RGB (no transfer function)
-        const [lr, lg, lb] = xyzToLinearRgb(X, Yv, Z, xyLvGamut);
+        // XYZ → linear RGB (tf='linear' means no OETF, returns raw linear values)
+        const [lr, lg, lb] = xyzToRgb(X, Yv, Z, xyLvGamut, 'linear');
 
         linearRgbArray[lutIdx + 0] = lr;
         linearRgbArray[lutIdx + 1] = lg;
