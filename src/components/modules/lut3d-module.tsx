@@ -141,6 +141,9 @@ export default function Lut3dModule() {
   const [applyImageProcessed, setApplyImageProcessed] = useState<string | null>(null);
   const applyCanvasRef = useRef<HTMLCanvasElement>(null);
   const [isDragging, setIsDragging] = useState(false);
+  // Image viewer dialog
+  const [imageViewSrc, setImageViewSrc] = useState<string | null>(null);
+  const [imageViewTitle, setImageViewTitle] = useState('');
 
   // ─── Tab 2: Generate LUT state ───
   const [srcGamut, setSrcGamut] = useState('sRGB');
@@ -319,6 +322,20 @@ export default function Lut3dModule() {
     },
     [handleApplyImageUpload]
   );
+
+  const handleExportImage = useCallback((dataUrl: string, filename: string) => {
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, []);
+
+  const handleOpenImageView = useCallback((src: string, title: string) => {
+    setImageViewSrc(src);
+    setImageViewTitle(title);
+  }, []);
 
   // ──────────────────────────────────────────
   // Tab 2: Generate LUT handlers
@@ -1365,27 +1382,65 @@ export default function Lut3dModule() {
                     <div className="grid grid-cols-2 gap-3">
                       {applyImage && (
                         <div className="space-y-1.5">
-                          <Label className="text-xs text-muted-foreground">原图</Label>
-                          <div className="rounded-md border overflow-hidden bg-checkered">
+                          <div className="flex items-center justify-between">
+                            <Label className="text-xs text-muted-foreground">原图</Label>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 px-1.5 text-[10px] gap-1"
+                              onClick={() => handleExportImage(applyImage, 'original.png')}
+                            >
+                              <Download className="w-3 h-3" />
+                              导出
+                            </Button>
+                          </div>
+                          <div
+                            className="rounded-md border overflow-hidden bg-checkered cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all relative group"
+                            onClick={() => handleOpenImageView(applyImage, '原图')}
+                          >
                             <img
                               src={applyImage}
                               alt="Original"
                               className="w-full h-auto"
                               style={{ maxHeight: 200, objectFit: 'contain' }}
                             />
+                            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center">
+                              <span className="opacity-0 group-hover:opacity-100 transition-opacity text-white text-xs bg-black/60 px-2 py-1 rounded">
+                                点击放大
+                              </span>
+                            </div>
                           </div>
                         </div>
                       )}
                       {applyImageProcessed && (
                         <div className="space-y-1.5">
-                          <Label className="text-xs text-muted-foreground">LUT 处理后</Label>
-                          <div className="rounded-md border overflow-hidden bg-checkered">
+                          <div className="flex items-center justify-between">
+                            <Label className="text-xs text-muted-foreground">LUT 处理后</Label>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 px-1.5 text-[10px] gap-1"
+                              onClick={() => handleExportImage(applyImageProcessed, 'lut_processed.png')}
+                            >
+                              <Download className="w-3 h-3" />
+                              导出
+                            </Button>
+                          </div>
+                          <div
+                            className="rounded-md border overflow-hidden bg-checkered cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all relative group"
+                            onClick={() => handleOpenImageView(applyImageProcessed, 'LUT 处理后')}
+                          >
                             <img
                               src={applyImageProcessed}
                               alt="Processed"
                               className="w-full h-auto"
                               style={{ maxHeight: 200, objectFit: 'contain' }}
                             />
+                            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center">
+                              <span className="opacity-0 group-hover:opacity-100 transition-opacity text-white text-xs bg-black/60 px-2 py-1 rounded">
+                                点击放大
+                              </span>
+                            </div>
                           </div>
                         </div>
                       )}
@@ -2914,6 +2969,38 @@ export default function Lut3dModule() {
           </div>
         </TabsContent>
       </Tabs>
+
+      {/* Image Viewer Dialog */}
+      <Dialog open={!!imageViewSrc} onOpenChange={(open) => { if (!open) setImageViewSrc(null); }}>
+        <DialogContent className="sm:max-w-4xl max-h-[90vh] p-2">
+          <DialogHeader className="px-4 pt-2">
+            <div className="flex items-center justify-between">
+              <DialogTitle className="text-sm">{imageViewTitle}</DialogTitle>
+              {imageViewSrc && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1.5 text-xs"
+                  onClick={() => handleExportImage(imageViewSrc, `${imageViewTitle}.png`)}
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  导出图片
+                </Button>
+              )}
+            </div>
+          </DialogHeader>
+          <div className="overflow-auto flex items-center justify-center p-2" style={{ maxHeight: 'calc(90vh - 80px)' }}>
+            {imageViewSrc && (
+              <img
+                src={imageViewSrc}
+                alt={imageViewTitle}
+                className="max-w-full h-auto rounded-md"
+                style={{ imageRendering: 'auto' }}
+              />
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Generate LUT: Name Dialog */}
       <Dialog open={showGenerateNameDialog} onOpenChange={setShowGenerateNameDialog}>
