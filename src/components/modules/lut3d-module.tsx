@@ -782,9 +782,10 @@ export default function Lut3dModule() {
           const upData = new Float32Array(4913 * 6);
 
           // Helper to compute R/G/B coordinate for a grid index (0-16)
+          // Round to integer for bit-depth modes (8-bit, 10-bit, etc.)
           const coordVal = (idx: number): number => {
             if (maxRGB <= 1) return idx / 16;
-            return (idx / 16) * maxRGB;
+            return Math.round((idx / 16) * maxRGB);
           };
 
           // Iterate in the detected loop order
@@ -893,7 +894,9 @@ export default function Lut3dModule() {
       const x = srcData[i * 6 + 3];
       const y = srcData[i * 6 + 4];
       const Lv = srcData[i * 6 + 5];
-      lines.push(`${r.toFixed(6)},${g.toFixed(6)},${b.toFixed(6)},${x.toFixed(6)},${y.toFixed(6)},${Lv.toFixed(6)}`);
+      // R,G,B as integers if > 1, otherwise as floats; x,y,Lv always as decimals
+      const fmtRGB = (v: number) => v > 1 ? Math.round(v).toString() : v.toFixed(6);
+      lines.push(`${fmtRGB(r)},${fmtRGB(g)},${fmtRGB(b)},${x.toFixed(6)},${y.toFixed(6)},${Lv.toFixed(6)}`);
     }
     const csvStr = lines.join('\n');
     const blob = new Blob([csvStr], { type: 'text/csv' });
@@ -2601,7 +2604,7 @@ export default function Lut3dModule() {
                   导入 5×5×5 RGB-xyLv 数据，上采样到 17³，转换为 RGB 3DLUT。
                 </CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4 max-h-[600px] overflow-y-auto">
+              <CardContent className="space-y-4 max-h-[700px] overflow-y-auto">
                 {/* Import section */}
                 <div className="space-y-3">
                   <Label className="text-sm font-medium">导入 xyLv 数据</Label>
