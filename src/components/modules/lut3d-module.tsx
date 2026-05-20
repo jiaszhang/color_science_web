@@ -696,49 +696,59 @@ export default function Lut3dModule() {
     requestAnimationFrame(() => {
       setTimeout(() => {
         try {
-          // Auto-detect R, G, B scale from input data
-          // Collect unique R, G, B values to determine the grid spacing
-          const rValues = new Set<number>();
-          const gValues = new Set<number>();
-          const bValues = new Set<number>();
+          // ── Step 1: Detect the scale of R, G, B values ──
+          let maxRGB = 0;
           for (let i = 0; i < 125; i++) {
-            rValues.add(xyLvData5[i * 6 + 0]);
-            gValues.add(xyLvData5[i * 6 + 1]);
-            bValues.add(xyLvData5[i * 6 + 2]);
+            maxRGB = Math.max(maxRGB, xyLvData5[i * 6 + 0], xyLvData5[i * 6 + 1], xyLvData5[i * 6 + 2]);
           }
 
-          // Determine the scale: find max value to decide if data is 0-1 or 0-4 etc.
-          const maxRGB = Math.max(
-            ...Array.from(rValues), ...Array.from(gValues), ...Array.from(bValues)
-          );
-          // Grid index for a 5³ grid: round to nearest index (0-4)
+          // Map an R/G/B value to a 5³ grid index (0-4)
+          // For 8-bit data (0-255): 0→0, 64→1, 128→2, 192→3, 255→4
+          // For normalized data (0-1): 0→0, 0.25→1, 0.5→2, 0.75→3, 1.0→4
           const toGridIdx = (val: number): number => {
             if (maxRGB <= 1) {
-              // Normalized 0-1: map to 0-4
               return Math.round(val * 4);
             } else {
-              // Already in index form (0-4 or similar)
-              return Math.round(val);
+              return Math.round(val * 4 / maxRGB);
             }
           };
 
-          // Normalize to 0-1 for LUT grid coordinates
-          const toNorm = (val: number): number => {
-            if (maxRGB <= 1) return val;
-            return val / maxRGB;
-          };
+          // ── Step 2: Detect iteration order from first two rows ──
+          // Standard .cube: R-innermost (R changes between row 0 and 1)
+          // Some formats: B-innermost (B changes between row 0 and 1)
+          const r0 = xyLvData5[0], g0 = xyLvData5[1], b0 = xyLvData5[2];
+          const r1 = xyLvData5[6], g1 = xyLvData5[7], b1 = xyLvData5[8];
+          // Check which channel changed between row 0 and row 1
+          const rChanged = (r0 !== r1);
+          const gChanged = (g0 !== g1);
+          const bChanged = (b0 !== b1);
+          // The channel that changes between consecutive rows is the innermost loop variable
+          // Determine loop order: [outermost, middle, innermost] using 0=R, 1=G, 2=B
+          let loopOrder: [number, number, number];
+          if (rChanged && !gChanged && !bChanged) {
+            // R is innermost → standard .cube order: B-outer, G-mid, R-inner
+            loopOrder = [2, 1, 0];
+          } else if (bChanged && !rChanged && !gChanged) {
+            // B is innermost → R-outer, G-mid, B-inner
+            loopOrder = [0, 1, 2];
+          } else if (gChanged && !rChanged && !bChanged) {
+            // G is innermost → R-outer, B-mid, G-inner
+            loopOrder = [0, 2, 1];
+          } else {
+            // Fallback: assume standard .cube order
+            loopOrder = [2, 1, 0];
+          }
 
-          // Create three separate 5³ LUTs for x, y, Lv channels
-          // Use R, G, B values from input to place data at correct grid positions
+          // ── Step 3: Build three 5³ LUTs for x, y, Lv channels ──
           const makeLut5 = (channelOffset: number): LUT3D => {
             const data = new Float32Array(125 * 3);
-            // Fill with NaN to detect unmapped positions
             data.fill(NaN);
             for (let i = 0; i < 125; i++) {
               const ri = clamp(toGridIdx(xyLvData5[i * 6 + 0]), 0, 4);
               const gi = clamp(toGridIdx(xyLvData5[i * 6 + 1]), 0, 4);
               const bi = clamp(toGridIdx(xyLvData5[i * 6 + 2]), 0, 4);
               const val = xyLvData5[i * 6 + channelOffset];
+              // LUT3D internal storage: (bi * 25 + gi * 5 + ri) * 3
               const idx = (bi * 5 * 5 + gi * 5 + ri) * 3;
               data[idx + 0] = val;
               data[idx + 1] = val;
@@ -761,32 +771,49 @@ export default function Lut3dModule() {
           const lutY = makeLut5(4);
           const lutLv = makeLut5(5);
 
-          // Upsample each to 17³ (no normalization of x, y, Lv values)
+          // ── Step 4: Upsample each to 17³ ──
+          // x, y, Lv values are NOT normalized - they keep their original scale
           const upX = upsampleLUT(lutX, 17);
           const upY = upsampleLUT(lutY, 17);
           const upLv = upsampleLUT(lutLv, 17);
 
-          // Combine back: for each 17³ entry, reconstruct R,G,B,x,y,Lv
-          // Use original (non-normalized) R, G, B values for the grid positions
+          // ── Step 5: Combine back into 17³ xyLv data ──
+          // Output in the same iteration order as the input data
           const upData = new Float32Array(4913 * 6);
-          for (let b = 0; b < 17; b++) {
-            for (let g = 0; g < 17; g++) {
-              for (let r = 0; r < 17; r++) {
-                const lutIdx = (b * 17 * 17 + g * 17 + r) * 3;
-                const outIdx = (b * 17 * 17 + g * 17 + r) * 6;
-                // Store original-scale grid coordinates (not normalized to 0-1)
-                if (maxRGB <= 1) {
-                  upData[outIdx + 0] = r / 16;
-                  upData[outIdx + 1] = g / 16;
-                  upData[outIdx + 2] = b / 16;
-                } else {
-                  upData[outIdx + 0] = (r / 16) * maxRGB;
-                  upData[outIdx + 1] = (g / 16) * maxRGB;
-                  upData[outIdx + 2] = (b / 16) * maxRGB;
-                }
-                upData[outIdx + 3] = upX.data[lutIdx]; // x (interpolated, not normalized)
-                upData[outIdx + 4] = upY.data[lutIdx]; // y (interpolated, not normalized)
-                upData[outIdx + 5] = upLv.data[lutIdx]; // Lv (interpolated, not normalized)
+
+          // Helper to compute R/G/B coordinate for a grid index (0-16)
+          const coordVal = (idx: number): number => {
+            if (maxRGB <= 1) return idx / 16;
+            return (idx / 16) * maxRGB;
+          };
+
+          // Iterate in the detected loop order
+          const [outer, mid, inner] = loopOrder;
+          let outRow = 0;
+          for (let oi = 0; oi < 17; oi++) {
+            for (let mi = 0; mi < 17; mi++) {
+              for (let ii = 0; ii < 17; ii++) {
+                // Map loop indices to R, G, B indices
+                const indices = [0, 0, 0];
+                indices[outer] = oi;
+                indices[mid] = mi;
+                indices[inner] = ii;
+                const ri = indices[0], gi = indices[1], bi = indices[2];
+
+                // Access the LUT data (internal: B-outer, G-mid, R-inner)
+                const lutIdx = (bi * 17 * 17 + gi * 17 + ri) * 3;
+                const outIdx = outRow * 6;
+
+                // R, G, B coordinates in original scale
+                upData[outIdx + 0] = coordVal(ri);
+                upData[outIdx + 1] = coordVal(gi);
+                upData[outIdx + 2] = coordVal(bi);
+                // x, y, Lv interpolated values (NOT normalized)
+                upData[outIdx + 3] = upX.data[lutIdx];
+                upData[outIdx + 4] = upY.data[lutIdx];
+                upData[outIdx + 5] = upLv.data[lutIdx];
+
+                outRow++;
               }
             }
           }
@@ -807,14 +834,32 @@ export default function Lut3dModule() {
 
     setXyLvConvertError('');
     try {
+      // Detect max R/G/B coordinate to map to grid indices
+      let maxCoord = 0;
       for (let i = 0; i < total; i++) {
+        maxCoord = Math.max(maxCoord, srcData[i * 6 + 0], srcData[i * 6 + 1], srcData[i * 6 + 2]);
+      }
+
+      for (let i = 0; i < total; i++) {
+        const r = srcData[i * 6 + 0];
+        const g = srcData[i * 6 + 1];
+        const b = srcData[i * 6 + 2];
         const x = srcData[i * 6 + 3];
         const y = srcData[i * 6 + 4];
         const Lv = srcData[i * 6 + 5];
-        const [r, g, b] = xyYToRgb(x, y, Lv, xyLvGamut, xyLvTF);
-        lutData[i * 3 + 0] = clamp(r, 0, 1);
-        lutData[i * 3 + 1] = clamp(g, 0, 1);
-        lutData[i * 3 + 2] = clamp(b, 0, 1);
+
+        // Map R, G, B coordinates to grid indices (0 to size-1)
+        const ri = maxCoord <= 1 ? Math.round(r * (size - 1)) : Math.round(r / maxCoord * (size - 1));
+        const gi = maxCoord <= 1 ? Math.round(g * (size - 1)) : Math.round(g / maxCoord * (size - 1));
+        const bi = maxCoord <= 1 ? Math.round(b * (size - 1)) : Math.round(b / maxCoord * (size - 1));
+
+        // LUT3D internal storage: (bi * size² + gi * size + ri) * 3
+        const lutIdx = (bi * size * size + gi * size + ri) * 3;
+
+        const [outR, outG, outB] = xyYToRgb(x, y, Lv, xyLvGamut, xyLvTF);
+        lutData[lutIdx + 0] = clamp(outR, 0, 1);
+        lutData[lutIdx + 1] = clamp(outG, 0, 1);
+        lutData[lutIdx + 2] = clamp(outB, 0, 1);
       }
 
       const id = generateId();
@@ -2556,7 +2601,7 @@ export default function Lut3dModule() {
                   导入 5×5×5 RGB-xyLv 数据，上采样到 17³，转换为 RGB 3DLUT。
                 </CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4">
+              <CardContent className="space-y-4 max-h-[600px] overflow-y-auto">
                 {/* Import section */}
                 <div className="space-y-3">
                   <Label className="text-sm font-medium">导入 xyLv 数据</Label>
@@ -2570,7 +2615,7 @@ export default function Lut3dModule() {
                       setXyLvParseError('');
                     }}
                     placeholder="0,0,0,0.3127,0.329,0.0&#10;0.25,0,0,0.45,0.35,0.1&#10;..."
-                    className="min-h-[120px] font-mono text-xs"
+                    className="min-h-[120px] max-h-[200px] font-mono text-xs"
                   />
                   <div className="flex gap-2">
                     <Button
