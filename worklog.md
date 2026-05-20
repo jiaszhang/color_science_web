@@ -62,3 +62,29 @@ Stage Summary:
 - Modified file: src/components/modules/gamut-calibration-module.tsx
 - The 色域转换计算 bit depth selection now has the same UI style and effect as 色彩基础 色域转换
 - Button-style toggle with descriptive labels, card-style output display
+
+---
+Task ID: 4
+Agent: Main Agent
+Task: Add chromaticity upsampling module to 3DLUT; Add ratio link mode to slider input
+
+Work Log:
+- Verified chromaticity upsampling tab already implemented in lut3d-module.tsx:
+  - 5×5×5 RGB xyLv import with CSV parsing (125 rows, 6 values per row)
+  - Upsampling from 5³ to 17³ using trilinear interpolation (three separate LUT3D objects for x, y, Lv channels)
+  - Export xyLv data as CSV
+  - Convert xyLv→RGB using xyYToRgb with specified color space and transfer function
+- Verified ratio link mode already implemented:
+  - Added 'ratio' to rgbLinkMode type union
+  - Added rgbRatioAnchor state
+  - Added "比例" button in slider link mode bar
+  - Implemented ratio scaling logic in all three slider onValueChange handlers
+  - Added ratio mode tip message
+- Updated page.tsx sidebar to include 'lut-upsampling' subItem under 3DLUT
+- Added xyYToRgb import from @/lib/color-science/transform
+- All lint checks pass, dev server running without errors
+
+Stage Summary:
+- Modified files: src/components/modules/lut3d-module.tsx, src/app/page.tsx
+- New "色度上采样" tab in 3DLUT module with full xyLv import/upsample/export/convert workflow
+- LUT application slider now has 4 link modes: independent, sync, link (delta), ratio (proportional scale)
