@@ -35,6 +35,24 @@ import { Textarea } from '@/components/ui/textarea';
 import { Progress } from '@/components/ui/progress';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
   Palette,
   Wand2,
   Layers,
@@ -54,6 +72,7 @@ import {
   ArrowRight,
   Grid3x3,
   Expand,
+  Info,
 
 } from 'lucide-react';
 
@@ -180,6 +199,14 @@ export default function Lut3dModule() {
   const [gamutAdjResult, setGamutAdjResult] = useState<string>('');
   const [isGamutAdjusting, setIsGamutAdjusting] = useState(false);
 
+  // ─── Generate LUT: name dialog ───
+  const [showGenerateNameDialog, setShowGenerateNameDialog] = useState(false);
+  const [generateLutName, setGenerateLutName] = useState('');
+
+  // ─── Delete LUT: confirmation dialog ───
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [deleteConfirmName, setDeleteConfirmName] = useState('');
+
   const gamutNames = getGamutNames();
   const tfNames = getTransferFunctionNames();
 
@@ -283,10 +310,32 @@ export default function Lut3dModule() {
   // Tab 2: Generate LUT handlers
   // ──────────────────────────────────────────
 
-  const handleGenerate = useCallback(() => {
+  // Generate a unique LUT name with incremental counter
+  const generateUniqueLutName = useCallback((baseName: string) => {
+    const existingNames = new Set(Array.from(lutLibrary.values()).map((e) => e.name));
+    if (!existingNames.has(baseName)) return baseName;
+    let counter = 2;
+    while (existingNames.has(`${baseName} #${counter}`)) {
+      counter++;
+    }
+    return `${baseName} #${counter}`;
+  }, [lutLibrary]);
+
+  const handleGenerateClick = useCallback(() => {
+    // Show name dialog with a suggested name
+    const baseName = `${srcGamut} → ${dstGamut}`;
+    const uniqueName = generateUniqueLutName(baseName);
+    setGenerateLutName(uniqueName);
+    setShowGenerateNameDialog(true);
+  }, [srcGamut, dstGamut, generateUniqueLutName]);
+
+  const handleGenerateConfirm = useCallback(() => {
+    setShowGenerateNameDialog(false);
     setIsGenerating(true);
     setGenerateProgress(0);
     setGeneratedLUT(null);
+
+    const customName = generateLutName.trim() || `${srcGamut} → ${dstGamut}`;
 
     // Use requestAnimationFrame for progress feedback
     requestAnimationFrame(() => {
@@ -296,10 +345,10 @@ export default function Lut3dModule() {
           const lut = createColorSpaceLUT(gridSize, srcGamut, srcTF, dstGamut, dstTF);
           setGenerateProgress(80);
 
-          // Store in library
+          // Store in library with custom name
           const id = generateId();
           addLUT(id, {
-            name: lut.name,
+            name: customName,
             size: lut.size,
             data: lut.data,
             srcGamut: lut.srcGamut,
@@ -307,7 +356,7 @@ export default function Lut3dModule() {
           });
 
           setGenerateProgress(100);
-          setGeneratedLUT(lut);
+          setGeneratedLUT({ ...lut, name: customName });
 
           // Auto-select for apply tab
           setApplySelectedLutId(id);
@@ -321,7 +370,7 @@ export default function Lut3dModule() {
         }
       }, 50);
     });
-  }, [gridSize, srcGamut, srcTF, dstGamut, dstTF, addLUT]);
+  }, [gridSize, srcGamut, srcTF, dstGamut, dstTF, addLUT, generateLutName]);
 
   // ──────────────────────────────────────────
   // Tab 4: Manage LUT handlers
@@ -443,7 +492,7 @@ export default function Lut3dModule() {
     }
   }, [chainLut1Id, chainLut2Id, lutLibrary, addLUT]);
 
-  const handleDelete = useCallback(
+  const handleDeleteConfirm = useCallback(
     (id: string) => {
       removeLUT(id);
       if (applySelectedLutId === id) setApplySelectedLutId('');
@@ -451,6 +500,8 @@ export default function Lut3dModule() {
       if (chainLut2Id === id) setChainLut2Id('');
       if (manageInfoLutId === id) setManageInfoLutId('');
       if (exportSelectedLutId === id) setExportSelectedLutId('');
+      setDeleteConfirmId(null);
+      setDeleteConfirmName('');
     },
     [removeLUT, applySelectedLutId, chainLut1Id, chainLut2Id, manageInfoLutId, exportSelectedLutId]
   );
@@ -1117,56 +1168,25 @@ export default function Lut3dModule() {
                   </div>
                 )}
 
-                {/* B-slice selector with input */}
+                {/* B-slice selector */}
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
                     <Label className="text-xs text-muted-foreground">B 切片（行 = R, 列 = G）</Label>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <div className="flex gap-1">
-                      {Array.from({ length: 5 }, (_, b) => (
-                        <Button
-                          key={b}
-                          variant={activeBSlice === b ? 'default' : 'outline'}
-                          size="sm"
-                          className="h-7 px-2.5 text-[11px] flex-1"
-                          onClick={() => {
-                            setActiveBSlice(b);
-                            setBSliceInput(String(b));
-                          }}
-                        >
-                          B={(b / 4).toFixed(2)}
-                        </Button>
-                      ))}
-                    </div>
-                    <Separator orientation="vertical" className="h-7 mx-1" />
-                    <div className="flex items-center gap-1.5">
-                      <Label className="text-[11px] text-muted-foreground whitespace-nowrap">跳转:</Label>
-                      <Input
-                        type="number"
-                        min={0}
-                        max={4}
-                        step={1}
-                        value={bSliceInput}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setBSliceInput(val);
-                          const num = parseInt(val, 10);
-                          if (!isNaN(num) && num >= 0 && num <= 4) {
-                            setActiveBSlice(num);
-                          }
+                  <div className="flex gap-1.5">
+                    {Array.from({ length: 5 }, (_, b) => (
+                      <Button
+                        key={b}
+                        variant={activeBSlice === b ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-8 px-3 text-xs flex-1"
+                        onClick={() => {
+                          setActiveBSlice(b);
                         }}
-                        onBlur={() => {
-                          const num = parseInt(bSliceInput, 10);
-                          if (isNaN(num) || num < 0 || num > 4) {
-                            setBSliceInput(String(activeBSlice));
-                          }
-                        }}
-                        className="h-7 w-16 text-[11px] text-center"
-                        placeholder="0-4"
-                      />
-                      <span className="text-[10px] text-muted-foreground">(0–4)</span>
-                    </div>
+                      >
+                        B={(b / 4).toFixed(2)}
+                      </Button>
+                    ))}
                   </div>
 
                   {/* Scrollable table area */}
@@ -1363,7 +1383,7 @@ export default function Lut3dModule() {
                   </div>
                 )}
 
-                <Button onClick={handleGenerate} disabled={isGenerating} className="w-full">
+                <Button onClick={handleGenerateClick} disabled={isGenerating} className="w-full">
                   <Play className="w-4 h-4 mr-2" />
                   {isGenerating ? '正在生成...' : '生成 LUT'}
                 </Button>
@@ -1554,7 +1574,10 @@ export default function Lut3dModule() {
                             variant="ghost"
                             size="sm"
                             className="text-destructive hover:text-destructive h-8 w-8 p-0"
-                            onClick={() => handleDelete(entry.id)}
+                            onClick={() => {
+                              setDeleteConfirmId(entry.id);
+                              setDeleteConfirmName(entry.name);
+                            }}
                           >
                             <Trash2 className="w-4 h-4" />
                           </Button>
@@ -1676,101 +1699,24 @@ export default function Lut3dModule() {
               </CardContent>
             </Card>
 
-            {/* Right sidebar: LUT Details + Chain LUT */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">LUT 详情</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {!manageInfoLutId && (
-                  <div className="text-center text-muted-foreground py-8">
-                    <p className="text-sm">点击左侧 LUT 查看详情。</p>
-                  </div>
-                )}
-
-                {manageInfoLutId && lutLibrary.get(manageInfoLutId) && (
-                  (() => {
-                    const entry = lutLibrary.get(manageInfoLutId)!;
-                    return (
-                      <div className="space-y-3">
-                        <div className="rounded-lg border p-3 space-y-2.5">
-                          <div>
-                            <span className="text-xs text-muted-foreground block">名称</span>
-                            <span className="text-sm font-medium">{entry.name}</span>
-                          </div>
-                          <div>
-                            <span className="text-xs text-muted-foreground block">网格大小</span>
-                            <span className="text-sm">{entry.size} &times; {entry.size} &times; {entry.size}</span>
-                          </div>
-                          <div>
-                            <span className="text-xs text-muted-foreground block">总条目数</span>
-                            <span className="text-sm">{(entry.size ** 3).toLocaleString()}</span>
-                          </div>
-                          <div>
-                            <span className="text-xs text-muted-foreground block">内存</span>
-                            <span className="text-sm">{(entry.data.byteLength / 1024).toFixed(1)} KB</span>
-                          </div>
-                          {entry.srcGamut && (
-                            <div>
-                              <span className="text-xs text-muted-foreground block">源色域</span>
-                              <Badge variant="outline" className="text-xs">{entry.srcGamut}</Badge>
-                            </div>
-                          )}
-                          {entry.dstGamut && (
-                            <div>
-                              <span className="text-xs text-muted-foreground block">目标色域</span>
-                              <Badge variant="outline" className="text-xs">{entry.dstGamut}</Badge>
-                            </div>
-                          )}
-                        </div>
-
-                        <Separator />
-
-                        {/* Color sample: identity vs applied */}
-                        <div className="space-y-2">
-                          <Label className="text-xs text-muted-foreground">颜色采样</Label>
-                          <div className="grid grid-cols-4 gap-1.5">
-                            {[
-                              [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1],
-                              [0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5], [0.5, 0.5, 0.5],
-                            ].map(([r, g, b], i) => {
-                              const lut = libraryToLUT3D(entry);
-                              const [or, og, ob] = applyLUT3D(lut, r, g, b);
-                              return (
-                                <div key={i} className="flex flex-col items-center gap-0.5">
-                                  <div
-                                    className="w-8 h-8 rounded border"
-                                    style={{
-                                      backgroundColor: rgbToHex(
-                                        clamp(or, 0, 1),
-                                        clamp(og, 0, 1),
-                                        clamp(ob, 0, 1)
-                                      ),
-                                    }}
-                                    title={`输入: (${r}, ${g}, ${b}) → 输出: (${or.toFixed(3)}, ${og.toFixed(3)}, ${ob.toFixed(3)})`}
-                                  />
-                                  <span className="text-[9px] text-muted-foreground">
-                                    {r},{g},{b}
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })()
-                )}
-
-                {/* Chain LUTs — moved to sidebar */}
-                {lutEntries.length >= 2 && (
-                  <>
-                    <Separator className="my-4" />
+            {/* Right sidebar: Chain LUT (top) + LUT Details (bottom) */}
+            <div className="flex flex-col gap-6">
+              {/* Top: 链接 LUT */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Link2 className="w-4 h-4" />
+                    链接 LUT
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {lutEntries.length < 2 && (
+                    <div className="text-center text-muted-foreground py-4">
+                      <p className="text-sm">需要至少 2 个 LUT 才能链接。</p>
+                    </div>
+                  )}
+                  {lutEntries.length >= 2 && (
                     <div className="space-y-3">
-                      <Label className="text-sm font-medium flex items-center gap-2">
-                        <Link2 className="w-4 h-4" />
-                        链接 LUT
-                      </Label>
                       <p className="text-xs text-muted-foreground">
                         先应用 LUT1，再应用 LUT2，创建组合 LUT。
                       </p>
@@ -1788,10 +1734,101 @@ export default function Lut3dModule() {
                         链接 LUT
                       </Button>
                     </div>
-                  </>
-                )}
-              </CardContent>
-            </Card>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Bottom: LUT 详情 */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Info className="w-4 h-4" />
+                    LUT 详情
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {!manageInfoLutId && (
+                    <div className="text-center text-muted-foreground py-8">
+                      <p className="text-sm">点击左侧 LUT 查看详情。</p>
+                    </div>
+                  )}
+
+                  {manageInfoLutId && lutLibrary.get(manageInfoLutId) && (
+                    (() => {
+                      const entry = lutLibrary.get(manageInfoLutId)!;
+                      return (
+                        <div className="space-y-3">
+                          <div className="rounded-lg border p-3 space-y-2.5">
+                            <div>
+                              <span className="text-xs text-muted-foreground block">名称</span>
+                              <span className="text-sm font-medium">{entry.name}</span>
+                            </div>
+                            <div>
+                              <span className="text-xs text-muted-foreground block">网格大小</span>
+                              <span className="text-sm">{entry.size} &times; {entry.size} &times; {entry.size}</span>
+                            </div>
+                            <div>
+                              <span className="text-xs text-muted-foreground block">总条目数</span>
+                              <span className="text-sm">{(entry.size ** 3).toLocaleString()}</span>
+                            </div>
+                            <div>
+                              <span className="text-xs text-muted-foreground block">内存</span>
+                              <span className="text-sm">{(entry.data.byteLength / 1024).toFixed(1)} KB</span>
+                            </div>
+                            {entry.srcGamut && (
+                              <div>
+                                <span className="text-xs text-muted-foreground block">源色域</span>
+                                <Badge variant="outline" className="text-xs">{entry.srcGamut}</Badge>
+                              </div>
+                            )}
+                            {entry.dstGamut && (
+                              <div>
+                                <span className="text-xs text-muted-foreground block">目标色域</span>
+                                <Badge variant="outline" className="text-xs">{entry.dstGamut}</Badge>
+                              </div>
+                            )}
+                          </div>
+
+                          <Separator />
+
+                          {/* Color sample: identity vs applied */}
+                          <div className="space-y-2">
+                            <Label className="text-xs text-muted-foreground">颜色采样</Label>
+                            <div className="grid grid-cols-4 gap-1.5">
+                              {[
+                                [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1],
+                                [0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5], [0.5, 0.5, 0.5],
+                              ].map(([r, g, b], i) => {
+                                const lut = libraryToLUT3D(entry);
+                                const [or, og, ob] = applyLUT3D(lut, r, g, b);
+                                return (
+                                  <div key={i} className="flex flex-col items-center gap-0.5">
+                                    <div
+                                      className="w-8 h-8 rounded border"
+                                      style={{
+                                        backgroundColor: rgbToHex(
+                                          clamp(or, 0, 1),
+                                          clamp(og, 0, 1),
+                                          clamp(ob, 0, 1)
+                                        ),
+                                      }}
+                                      title={`输入: (${r}, ${g}, ${b}) → 输出: (${or.toFixed(3)}, ${og.toFixed(3)}, ${ob.toFixed(3)})`}
+                                    />
+                                    <span className="text-[9px] text-muted-foreground">
+                                      {r},{g},{b}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()
+                  )}
+                </CardContent>
+              </Card>
+            </div>
           </div>
         </TabsContent>
 
@@ -2249,6 +2286,64 @@ export default function Lut3dModule() {
           </div>
         </TabsContent>
       </Tabs>
+
+      {/* Generate LUT: Name Dialog */}
+      <Dialog open={showGenerateNameDialog} onOpenChange={setShowGenerateNameDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>生成 LUT</DialogTitle>
+            <DialogDescription>
+              为即将生成的 LUT 命名。你可以修改名称或使用建议的默认值。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Label className="text-xs text-muted-foreground">LUT 名称</Label>
+            <Input
+              value={generateLutName}
+              onChange={(e) => setGenerateLutName(e.target.value)}
+              placeholder="输入 LUT 名称"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  handleGenerateConfirm();
+                }
+              }}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              配置：{srcGamut} → {dstGamut} | {gridSize}³ | {srcTF} / {dstTF}
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowGenerateNameDialog(false)}>
+              取消
+            </Button>
+            <Button onClick={handleGenerateConfirm} disabled={!generateLutName.trim()}>
+              确认生成
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete LUT: Confirmation Dialog */}
+      <AlertDialog open={deleteConfirmId !== null} onOpenChange={(open) => { if (!open) { setDeleteConfirmId(null); setDeleteConfirmName(''); } }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认删除</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要删除 LUT「{deleteConfirmName}」吗？此操作无法撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => deleteConfirmId && handleDeleteConfirm(deleteConfirmId)}
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

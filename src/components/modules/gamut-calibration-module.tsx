@@ -11,6 +11,7 @@ import { Separator } from '@/components/ui/separator';
 import { Slider } from '@/components/ui/slider';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { useAppStore } from '@/lib/store/app-store';
 import {
   STANDARD_GAMUTS,
@@ -81,6 +82,25 @@ export default function GamutCalibrationModule() {
     { name: string; x: number; y: number; L: number }[]
   >([]);
   const [measureInput, setMeasureInput] = useState('');
+
+  // Bit-depth input mode for gamut-calc RGB input
+  type BitDepthMode = 'float' | '8bit' | '10bit';
+  const [inputBitDepth, setInputBitDepth] = useState<BitDepthMode>('float');
+  const bitDepthMax: Record<BitDepthMode, number> = { float: 1, '8bit': 255, '10bit': 1023 };
+  const bitDepthStep: Record<BitDepthMode, number> = { float: 0.01, '8bit': 1, '10bit': 1 };
+  const bitDepthLabel: Record<BitDepthMode, string> = {
+    float: '归一化浮点',
+    '8bit': '8-bit',
+    '10bit': '10-bit',
+  };
+  const toDisplayVal = (v: number, mode: BitDepthMode) => {
+    if (mode === 'float') return parseFloat(v.toFixed(4));
+    return Math.round(v * bitDepthMax[mode]);
+  };
+  const fromInputVal = (v: number, mode: BitDepthMode) => {
+    if (mode === 'float') return Math.max(0, Math.min(1, v));
+    return Math.max(0, Math.min(1, v / bitDepthMax[mode]));
+  };
 
   const gamutNames = useMemo(() => getGamutNames(), []);
   const tfNames = useMemo(() => getTransferFunctionNames(), []);
@@ -291,19 +311,50 @@ export default function GamutCalibrationModule() {
                 </div>
                 <Separator />
                 <div className="space-y-2">
-                  <Label className="text-xs">输入 RGB (0-1)</Label>
+                  <div className="flex items-center justify-between">
+                    <Label className="text-xs">输入 RGB</Label>
+                    <ToggleGroup type="single" value={inputBitDepth} onValueChange={(v) => { if (v) setInputBitDepth(v as BitDepthMode); }} className="h-7">
+                      <ToggleGroupItem value="float" className="text-[10px] px-2 h-7">浮点</ToggleGroupItem>
+                      <ToggleGroupItem value="8bit" className="text-[10px] px-2 h-7">8bit</ToggleGroupItem>
+                      <ToggleGroupItem value="10bit" className="text-[10px] px-2 h-7">10bit</ToggleGroupItem>
+                    </ToggleGroup>
+                  </div>
                   <div className="grid grid-cols-3 gap-2">
                     <div>
                       <Label className="text-[10px] text-red-500">R</Label>
-                      <Input type="number" step="0.01" min="0" max="1" value={inputR} onChange={(e) => setInputR(parseFloat(e.target.value) || 0)} className="h-8 text-xs" />
+                      <Input
+                        type="number"
+                        step={bitDepthStep[inputBitDepth]}
+                        min={0}
+                        max={bitDepthMax[inputBitDepth]}
+                        value={toDisplayVal(inputR, inputBitDepth)}
+                        onChange={(e) => setInputR(fromInputVal(parseFloat(e.target.value) || 0, inputBitDepth))}
+                        className="h-8 text-xs"
+                      />
                     </div>
                     <div>
                       <Label className="text-[10px] text-green-500">G</Label>
-                      <Input type="number" step="0.01" min="0" max="1" value={inputG} onChange={(e) => setInputG(parseFloat(e.target.value) || 0)} className="h-8 text-xs" />
+                      <Input
+                        type="number"
+                        step={bitDepthStep[inputBitDepth]}
+                        min={0}
+                        max={bitDepthMax[inputBitDepth]}
+                        value={toDisplayVal(inputG, inputBitDepth)}
+                        onChange={(e) => setInputG(fromInputVal(parseFloat(e.target.value) || 0, inputBitDepth))}
+                        className="h-8 text-xs"
+                      />
                     </div>
                     <div>
                       <Label className="text-[10px] text-blue-500">B</Label>
-                      <Input type="number" step="0.01" min="0" max="1" value={inputB} onChange={(e) => setInputB(parseFloat(e.target.value) || 0)} className="h-8 text-xs" />
+                      <Input
+                        type="number"
+                        step={bitDepthStep[inputBitDepth]}
+                        min={0}
+                        max={bitDepthMax[inputBitDepth]}
+                        value={toDisplayVal(inputB, inputBitDepth)}
+                        onChange={(e) => setInputB(fromInputVal(parseFloat(e.target.value) || 0, inputBitDepth))}
+                        className="h-8 text-xs"
+                      />
                     </div>
                   </div>
                 </div>
@@ -354,11 +405,11 @@ export default function GamutCalibrationModule() {
                       </div>
                     </div>
                     <div className="rounded-lg bg-muted/50 p-3 space-y-1.5">
-                      <p className="text-xs font-medium">目标 RGB</p>
+                      <p className="text-xs font-medium">目标 RGB ({bitDepthLabel[inputBitDepth]})</p>
                       <div className="grid grid-cols-3 gap-2 text-xs font-mono">
-                        <span className="text-red-500">R: {convertResult.outRgb[0].toFixed(6)}</span>
-                        <span className="text-green-500">G: {convertResult.outRgb[1].toFixed(6)}</span>
-                        <span className="text-blue-500">B: {convertResult.outRgb[2].toFixed(6)}</span>
+                        <span className="text-red-500">R: {inputBitDepth === 'float' ? convertResult.outRgb[0].toFixed(6) : toDisplayVal(Math.max(0, Math.min(1, convertResult.outRgb[0])), inputBitDepth)}</span>
+                        <span className="text-green-500">G: {inputBitDepth === 'float' ? convertResult.outRgb[1].toFixed(6) : toDisplayVal(Math.max(0, Math.min(1, convertResult.outRgb[1])), inputBitDepth)}</span>
+                        <span className="text-blue-500">B: {inputBitDepth === 'float' ? convertResult.outRgb[2].toFixed(6) : toDisplayVal(Math.max(0, Math.min(1, convertResult.outRgb[2])), inputBitDepth)}</span>
                       </div>
                     </div>
                     <div className="rounded-lg bg-muted/50 p-3 space-y-1.5">
