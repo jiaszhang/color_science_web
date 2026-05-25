@@ -184,8 +184,10 @@ export function chainLUTs(lut1: LUT3D, lut2: LUT3D, size = 33): LUT3D {
 
 /**
  * Export LUT to .cube format string
+ * @param lut - The LUT to export
+ * @param channelOrder - Channel order for data output: 'rgb' (R outer, G middle, B inner) or 'bgr' (B outer, G middle, R inner, standard .cube)
  */
-export function exportLUTToCube(lut: LUT3D): string {
+export function exportLUTToCube(lut: LUT3D, channelOrder: 'rgb' | 'bgr' = 'bgr'): string {
   const lines: string[] = [];
 
   // Header
@@ -200,12 +202,79 @@ export function exportLUTToCube(lut: LUT3D): string {
 
   // Data
   const size = lut.size;
-  for (let b = 0; b < size; b++) {
-    for (let g = 0; g < size; g++) {
-      for (let r = 0; r < size; r++) {
-        const idx = (b * size * size + g * size + r) * 3;
-        const rv = clampVec3([lut.data[idx], lut.data[idx + 1], lut.data[idx + 2]], 0, 1);
-        lines.push(`${rv[0].toFixed(6)} ${rv[1].toFixed(6)} ${rv[2].toFixed(6)}`);
+  if (channelOrder === 'bgr') {
+    // Standard .cube order: B outer, G middle, R inner
+    for (let b = 0; b < size; b++) {
+      for (let g = 0; g < size; g++) {
+        for (let r = 0; r < size; r++) {
+          const idx = (b * size * size + g * size + r) * 3;
+          const rv = clampVec3([lut.data[idx], lut.data[idx + 1], lut.data[idx + 2]], 0, 1);
+          lines.push(`${rv[0].toFixed(6)} ${rv[1].toFixed(6)} ${rv[2].toFixed(6)}`);
+        }
+      }
+    }
+  } else {
+    // RGB order: R outer (slowest), G middle, B inner (fastest)
+    for (let r = 0; r < size; r++) {
+      for (let g = 0; g < size; g++) {
+        for (let b = 0; b < size; b++) {
+          const idx = (b * size * size + g * size + r) * 3;
+          const rv = clampVec3([lut.data[idx], lut.data[idx + 1], lut.data[idx + 2]], 0, 1);
+          lines.push(`${rv[0].toFixed(6)} ${rv[1].toFixed(6)} ${rv[2].toFixed(6)}`);
+        }
+      }
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Export LUT to CSV format string
+ * Each line contains 3 comma-separated values (float 0-1 or integer based on bitDepth)
+ * @param lut - The LUT to export
+ * @param options - Export options: channel order and bit depth
+ */
+export function exportLUTToCSV(
+  lut: LUT3D,
+  options: {
+    channelOrder?: 'rgb' | 'bgr';
+    bitDepth?: number; // If provided, values are integers in range [0, 2^bitDepth - 1]; if omitted, float 0-1
+  } = {}
+): string {
+  const { channelOrder = 'bgr', bitDepth } = options;
+  const size = lut.size;
+  const lines: string[] = [];
+  const maxVal = bitDepth ? Math.pow(2, bitDepth) - 1 : 0;
+
+  const formatVal = (v: number): string => {
+    const clamped = Math.max(0, Math.min(1, v));
+    if (bitDepth) {
+      return String(Math.round(clamped * maxVal));
+    }
+    return clamped.toFixed(6);
+  };
+
+  if (channelOrder === 'bgr') {
+    // B outer, G middle, R inner (same as standard .cube layout)
+    for (let b = 0; b < size; b++) {
+      for (let g = 0; g < size; g++) {
+        for (let r = 0; r < size; r++) {
+          const idx = (b * size * size + g * size + r) * 3;
+          const rv = clampVec3([lut.data[idx], lut.data[idx + 1], lut.data[idx + 2]], 0, 1);
+          lines.push(`${formatVal(rv[0])},${formatVal(rv[1])},${formatVal(rv[2])}`);
+        }
+      }
+    }
+  } else {
+    // R outer (slowest), G middle, B inner (fastest)
+    for (let r = 0; r < size; r++) {
+      for (let g = 0; g < size; g++) {
+        for (let b = 0; b < size; b++) {
+          const idx = (b * size * size + g * size + r) * 3;
+          const rv = clampVec3([lut.data[idx], lut.data[idx + 1], lut.data[idx + 2]], 0, 1);
+          lines.push(`${formatVal(rv[0])},${formatVal(rv[1])},${formatVal(rv[2])}`);
+        }
       }
     }
   }

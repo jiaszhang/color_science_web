@@ -126,6 +126,7 @@ const modules: ModuleConfig[] = [
       { id: 'lut-import', name: 'LUT 导入' },
       { id: 'lut-export', name: 'LUT 导出' },
       { id: 'lut-upsampling', name: '色度上采样' },
+      { id: 'lut-extract', name: '图片提取3DLUT' },
     ],
   },
   {

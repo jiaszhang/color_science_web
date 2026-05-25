@@ -7,6 +7,7 @@ import {
   applyLUT3D,
   chainLUTs,
   exportLUTToCube,
+  exportLUTToCSV,
   parseCubeFile,
   parseCSVLut,
   applyLUTToImageData,
@@ -74,8 +75,11 @@ import {
   Grid3x3,
   Expand,
   Info,
+  Camera,
 
 } from 'lucide-react';
+
+import LutExtractTab from './lut-extract-tab';
 
 // ============ Helpers ============
 
@@ -141,6 +145,10 @@ export default function Lut3dModule() {
   const [applyImageProcessed, setApplyImageProcessed] = useState<string | null>(null);
   const applyCanvasRef = useRef<HTMLCanvasElement>(null);
   const [isDragging, setIsDragging] = useState(false);
+  // Track original image properties for faithful export
+  const [originalImageType, setOriginalImageType] = useState<string>('image/png');
+  const [originalImageHasAlpha, setOriginalImageHasAlpha] = useState<boolean>(true);
+  const [originalFileName, setOriginalFileName] = useState<string>('');
   // Image viewer dialog
   const [imageViewSrc, setImageViewSrc] = useState<string | null>(null);
   const [imageViewTitle, setImageViewTitle] = useState('');
@@ -181,6 +189,12 @@ export default function Lut3dModule() {
   const [exportSelectedLutId, setExportSelectedLutId] = useState<string>('');
   const [cubePreview, setCubePreview] = useState('');
   const [copySuccess, setCopySuccess] = useState(false);
+  // Export format & options
+  const [exportFormat, setExportFormat] = useState<'cube' | 'csv'>('cube');
+  const [exportChannelOrder, setExportChannelOrder] = useState<'bgr' | 'rgb'>('bgr');
+  const [exportCsvBitDepth, setExportCsvBitDepth] = useState<number>(0); // 0 = float, 8/10/12/16 = integer
+  // Original image reference for full-res export
+  const [originalImageElement, setOriginalImageElement] = useState<HTMLImageElement | null>(null);
 
   // ─── Feature 3: Bit-depth input mode ───
   type BitDepthMode = 'float' | '8bit' | '10bit';
@@ -268,6 +282,10 @@ export default function Lut3dModule() {
       if (!entry) return;
       const lut = libraryToLUT3D(entry);
 
+      // Store original image metadata for faithful export
+      setOriginalImageType(file.type || 'image/png');
+      setOriginalFileName(file.name);
+
       const reader = new FileReader();
       reader.onload = (e) => {
         const dataUrl = e.target?.result as string;
@@ -276,23 +294,50 @@ export default function Lut3dModule() {
 
         const img = new Image();
         img.onload = () => {
+          // Store original image element for full-res export later
+          setOriginalImageElement(img);
+
           const canvas = applyCanvasRef.current;
           if (!canvas) return;
-          // Scale down for performance
-          const maxDim = 800;
-          const scale = Math.min(maxDim / img.width, maxDim / img.height, 1);
-          canvas.width = Math.round(img.width * scale);
-          canvas.height = Math.round(img.height * scale);
+          // Use full original resolution for processing
+          canvas.width = img.width;
+          canvas.height = img.height;
 
           const ctx = canvas.getContext('2d');
           if (!ctx) return;
 
           ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
           const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+          // Detect if original image has alpha channel (check if any alpha value is not 255)
+          let hasAlpha = false;
+          for (let i = 3; i < imageData.data.length; i += 4) {
+            if (imageData.data[i] !== 255) {
+              hasAlpha = true;
+              break;
+            }
+          }
+          setOriginalImageHasAlpha(hasAlpha);
+
           const processed = applyLUTToImageData(lut, imageData);
           ctx.putImageData(processed, 0, 0);
 
-          setApplyImageProcessed(canvas.toDataURL('image/png'));
+          // Export in original format, preserving channel count
+          const mimeType = file.type || 'image/png';
+          let exportDataUrl: string;
+          if (hasAlpha || mimeType === 'image/png') {
+            // Keep alpha if present, or PNG format
+            exportDataUrl = canvas.toDataURL(mimeType);
+          } else {
+            // No alpha: create RGB-only output (3 channel)
+            const rgbCanvas = document.createElement('canvas');
+            rgbCanvas.width = img.width;
+            rgbCanvas.height = img.height;
+            const rgbCtx = rgbCanvas.getContext('2d')!;
+            rgbCtx.drawImage(canvas, 0, 0);
+            exportDataUrl = rgbCanvas.toDataURL(mimeType, 0.95);
+          }
+          setApplyImageProcessed(exportDataUrl);
         };
         img.src = dataUrl;
       };
@@ -630,40 +675,61 @@ export default function Lut3dModule() {
       return;
     }
     const lut = libraryToLUT3D(entry);
-    const cubeStr = exportLUTToCube(lut);
-    const lines = cubeStr.split('\n');
+    let content = '';
+    if (exportFormat === 'cube') {
+      content = exportLUTToCube(lut, exportChannelOrder);
+    } else {
+      content = exportLUTToCSV(lut, { channelOrder: exportChannelOrder, bitDepth: exportCsvBitDepth || undefined });
+    }
+    const lines = content.split('\n');
     setCubePreview(lines.slice(0, 50).join('\n') + (lines.length > 50 ? '\n...' : ''));
-  }, [exportSelectedLutId, lutLibrary]);
+  }, [exportSelectedLutId, lutLibrary, exportFormat, exportChannelOrder, exportCsvBitDepth]);
 
   const handleDownload = useCallback(() => {
     const entry = lutLibrary.get(exportSelectedLutId);
     if (!entry) return;
     const lut = libraryToLUT3D(entry);
-    const cubeStr = exportLUTToCube(lut);
-    const blob = new Blob([cubeStr], { type: 'text/plain' });
+    let content = '';
+    let filename = '';
+    let mimeType = '';
+    if (exportFormat === 'cube') {
+      content = exportLUTToCube(lut, exportChannelOrder);
+      filename = `${lut.name.replace(/\s+/g, '_')}.cube`;
+      mimeType = 'text/plain';
+    } else {
+      content = exportLUTToCSV(lut, { channelOrder: exportChannelOrder, bitDepth: exportCsvBitDepth || undefined });
+      filename = `${lut.name.replace(/\s+/g, '_')}.csv`;
+      mimeType = 'text/csv';
+    }
+    const blob = new Blob([content], { type: mimeType });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${lut.name.replace(/\s+/g, '_')}.cube`;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [exportSelectedLutId, lutLibrary]);
+  }, [exportSelectedLutId, lutLibrary, exportFormat, exportChannelOrder, exportCsvBitDepth]);
 
   const handleCopy = useCallback(async () => {
     const entry = lutLibrary.get(exportSelectedLutId);
     if (!entry) return;
     const lut = libraryToLUT3D(entry);
-    const cubeStr = exportLUTToCube(lut);
+    let content = '';
+    if (exportFormat === 'cube') {
+      content = exportLUTToCube(lut, exportChannelOrder);
+    } else {
+      content = exportLUTToCSV(lut, { channelOrder: exportChannelOrder, bitDepth: exportCsvBitDepth || undefined });
+    }
     try {
-      await navigator.clipboard.writeText(cubeStr);
+      await navigator.clipboard.writeText(content);
       setCopySuccess(true);
       setTimeout(() => setCopySuccess(false), 2000);
     } catch {
       // Fallback
       const textarea = document.createElement('textarea');
-      textarea.value = cubeStr;
+      textarea.value = content;
       document.body.appendChild(textarea);
       textarea.select();
       document.execCommand('copy');
@@ -671,7 +737,7 @@ export default function Lut3dModule() {
       setCopySuccess(true);
       setTimeout(() => setCopySuccess(false), 2000);
     }
-  }, [exportSelectedLutId, lutLibrary]);
+  }, [exportSelectedLutId, lutLibrary, exportFormat, exportChannelOrder, exportCsvBitDepth]);
 
   // ──────────────────────────────────────────
   // Tab: Chromaticity Upsampling handlers
@@ -1021,6 +1087,10 @@ export default function Lut3dModule() {
           <TabsTrigger value="generate" className="gap-1.5">
             <Play className="w-4 h-4" />
             <span>LUT 生成</span>
+          </TabsTrigger>
+          <TabsTrigger value="extract" className="gap-1.5">
+            <Camera className="w-4 h-4" />
+            <span>图片提取3DLUT</span>
           </TabsTrigger>
           <TabsTrigger value="manage" className="gap-1.5">
             <Layers className="w-4 h-4" />
@@ -1384,12 +1454,20 @@ export default function Lut3dModule() {
                       {applyImage && (
                         <div className="space-y-1.5">
                           <div className="flex items-center justify-between">
-                            <Label className="text-xs text-muted-foreground">原图</Label>
+                            <Label className="text-xs text-muted-foreground">
+                              原图
+                              <span className="ml-1 opacity-60">
+                                ({originalImageHasAlpha ? 'RGBA' : 'RGB'})
+                              </span>
+                            </Label>
                             <Button
                               variant="ghost"
                               size="sm"
                               className="h-6 px-1.5 text-[10px] gap-1"
-                              onClick={() => handleExportImage(applyImage, 'original.png')}
+                              onClick={() => {
+                                const ext = originalImageType === 'image/jpeg' ? 'jpg' : originalImageType === 'image/webp' ? 'webp' : 'png';
+                                handleExportImage(applyImage, `original.${ext}`);
+                              }}
                             >
                               <Download className="w-3 h-3" />
                               导出
@@ -1416,12 +1494,20 @@ export default function Lut3dModule() {
                       {applyImageProcessed && (
                         <div className="space-y-1.5">
                           <div className="flex items-center justify-between">
-                            <Label className="text-xs text-muted-foreground">LUT 处理后</Label>
+                            <Label className="text-xs text-muted-foreground">
+                              LUT 处理后
+                              <span className="ml-1 opacity-60">
+                                ({originalImageHasAlpha ? 'RGBA' : 'RGB'})
+                              </span>
+                            </Label>
                             <Button
                               variant="ghost"
                               size="sm"
                               className="h-6 px-1.5 text-[10px] gap-1"
-                              onClick={() => handleExportImage(applyImageProcessed, 'lut_processed.png')}
+                              onClick={() => {
+                                const ext = originalImageType === 'image/jpeg' ? 'jpg' : originalImageType === 'image/webp' ? 'webp' : 'png';
+                                handleExportImage(applyImageProcessed, `lut_processed.${ext}`);
+                              }}
                             >
                               <Download className="w-3 h-3" />
                               导出
@@ -1851,6 +1937,13 @@ export default function Lut3dModule() {
               </CardContent>
             </Card>
           </div>
+        </TabsContent>
+
+        {/* ============================== */}
+        {/* TAB: Extract 3DLUT from Images */}
+        {/* ============================== */}
+        <TabsContent value="extract">
+          <LutExtractTab />
         </TabsContent>
 
         {/* ============================== */}
@@ -2588,9 +2681,9 @@ export default function Lut3dModule() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">导出 .cube 文件</CardTitle>
+                <CardTitle className="text-base">导出 3DLUT</CardTitle>
                 <CardDescription>
-                  从库中选择一个 LUT 以 .cube 格式导出。
+                  从库中选择一个 LUT 以 .cube 或 .csv 格式导出。
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -2628,6 +2721,67 @@ export default function Lut3dModule() {
                   })()
                 )}
 
+                <Separator />
+
+                {/* Export format selection */}
+                <div className="space-y-3">
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">导出格式</Label>
+                    <Select value={exportFormat} onValueChange={(v) => setExportFormat(v as 'cube' | 'csv')}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="cube">.cube (标准 3DLUT 格式)</SelectItem>
+                        <SelectItem value="csv">.csv (逗号分隔值)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* Channel order selection */}
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">通道顺序</Label>
+                    <Select value={exportChannelOrder} onValueChange={(v) => setExportChannelOrder(v as 'bgr' | 'rgb')}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="bgr">BGR (B 外层, G 中层, R 内层 — 标准 .cube 顺序)</SelectItem>
+                        <SelectItem value="rgb">RGB (R 外层, G 中层, B 内层)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      {exportChannelOrder === 'bgr'
+                        ? '数据按 B→G→R 顺序排列，最外层循环为 B，最内层为 R'
+                        : '数据按 R→G→B 顺序排列，最外层循环为 R，最内层为 B'}
+                    </p>
+                  </div>
+
+                  {/* CSV bit depth option (only shown for CSV format) */}
+                  {exportFormat === 'csv' && (
+                    <div className="space-y-2">
+                      <Label className="text-sm font-medium">CSV 数值精度</Label>
+                      <Select value={String(exportCsvBitDepth)} onValueChange={(v) => setExportCsvBitDepth(Number(v))}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="0">浮点 (0.000000 - 1.000000)</SelectItem>
+                          <SelectItem value="8">8-bit 整数 (0 - 255)</SelectItem>
+                          <SelectItem value="10">10-bit 整数 (0 - 1023)</SelectItem>
+                          <SelectItem value="12">12-bit 整数 (0 - 4095)</SelectItem>
+                          <SelectItem value="16">16-bit 整数 (0 - 65535)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        {exportCsvBitDepth === 0
+                          ? '输出归一化浮点值，每行 3 个逗号分隔数值'
+                          : `输出 ${exportCsvBitDepth}-bit 整数值 (0 - ${Math.pow(2, exportCsvBitDepth) - 1})`}
+                      </p>
+                    </div>
+                  )}
+                </div>
+
                 <div className="flex gap-3">
                   <Button
                     onClick={handleDownload}
@@ -2635,7 +2789,7 @@ export default function Lut3dModule() {
                     className="flex-1 gap-2"
                   >
                     <Download className="w-4 h-4" />
-                    下载 .cube
+                    下载 .{exportFormat}
                   </Button>
                   <Button
                     onClick={handleCopy}
@@ -2657,8 +2811,16 @@ export default function Lut3dModule() {
             {/* Preview */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">.cube 文件预览</CardTitle>
-                <CardDescription>导出的 .cube 文件前 50 行。</CardDescription>
+                <CardTitle className="text-base">
+                  {exportFormat === 'cube' ? '.cube' : '.csv'} 文件预览
+                </CardTitle>
+                <CardDescription>
+                  导出文件前 50 行。
+                  {exportFormat === 'cube' && exportChannelOrder === 'rgb' && ' (RGB 顺序)'}
+                  {exportFormat === 'cube' && exportChannelOrder === 'bgr' && ' (BGR 标准顺序)'}
+                  {exportFormat === 'csv' && exportChannelOrder === 'rgb' && ' (RGB 顺序)'}
+                  {exportFormat === 'csv' && exportChannelOrder === 'bgr' && ' (BGR 顺序)'}
+                </CardDescription>
               </CardHeader>
               <CardContent>
                 {!cubePreview && (
