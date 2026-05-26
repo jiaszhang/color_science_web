@@ -1,0 +1,3227 @@
+'use client';
+
+import { useState, useRef, useCallback, useEffect } from 'react';
+import {
+  createLUT3D,
+  createColorSpaceLUT,
+  applyLUT3D,
+  chainLUTs,
+  exportLUTToCube,
+  exportLUTToCSV,
+  parseCubeFile,
+  parseCSVLut,
+  applyLUTToImageData,
+  upsampleLUT,
+  adjustLUTGamut,
+  type LUT3D,
+} from '@/lib/color-science/lut3d';
+import { getGamutNames, getTransferFunctionNames, type TransferFunctionName } from '@/lib/color-science';
+import { xyYToXYZ, xyzToRgb, linearToRgb } from '@/lib/color-science/transform';
+import { useAppStore } from '@/lib/store/app-store';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Button } from '@/components/ui/button';
+import { Slider } from '@/components/ui/slider';
+import { Badge } from '@/components/ui/badge';
+import { Separator } from '@/components/ui/separator';
+import { Textarea } from '@/components/ui/textarea';
+import { Progress } from '@/components/ui/progress';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
+  Palette,
+  Wand2,
+  Layers,
+  FileUp,
+  FileDown,
+  Upload,
+  Download,
+  Copy,
+  Trash2,
+  Pencil,
+  Link2,
+  Unlink,
+  Play,
+  Check,
+  AlertCircle,
+  Image as ImageIcon,
+  ArrowRight,
+  Grid3x3,
+  Expand,
+  Info,
+  Camera,
+
+} from 'lucide-react';
+
+import LutExtractTab from './lut-extract-tab';
+
+// ============ Helpers ============
+
+function clamp(val: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, val));
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  const toHex = (v: number) => {
+    const clamped = clamp(Math.round(v * 255), 0, 255);
+    return clamped.toString(16).padStart(2, '0');
+  };
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function generateId(): string {
+  return `lut_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+}
+
+function libraryToLUT3D(entry: {
+  name: string;
+  size: number;
+  data: Float32Array;
+  srcGamut?: string;
+  dstGamut?: string;
+}): LUT3D {
+  return {
+    name: entry.name,
+    size: entry.size,
+    data: entry.data,
+    inputRange: { min: 0, max: 1 },
+    outputRange: { min: 0, max: 1 },
+    srcGamut: entry.srcGamut,
+    dstGamut: entry.dstGamut,
+  };
+}
+
+// ============ Component ============
+
+export default function Lut3dModule() {
+  // Store
+  const { lutLibrary, addLUT, removeLUT, renameLUT, activeTab, setActiveTab } = useAppStore();
+
+  const currentTab = ['lut-apply', 'lut-generate', 'lut-extract', 'lut-manage', 'lut-import', 'lut-export', 'lut-upsampling'].includes(activeTab) ? activeTab.replace('lut-', '') : 'apply';
+
+  // Library entries as array
+  const lutEntries = Array.from(lutLibrary.entries()).map(([id, entry]) => ({
+    id,
+    ...entry,
+  }));
+
+  // ─── Tab 1: Apply LUT state ───
+  const [applySelectedLutId, setApplySelectedLutId] = useState<string>('');
+  const [inputR, setInputR] = useState(0.5);
+  const [inputG, setInputG] = useState(0.5);
+  const [inputB, setInputB] = useState(0.5);
+  // RGB link mode: 'none' = independent, 'sync' = same value, 'link' = same delta, 'ratio' = proportional scale
+  const [rgbLinkMode, setRgbLinkMode] = useState<'none' | 'sync' | 'link' | 'ratio'>('none');
+  const [rgbAnchor, setRgbAnchor] = useState<[number, number, number]>([0.5, 0.5, 0.5]);
+  const [rgbRatioAnchor, setRgbRatioAnchor] = useState<[number, number, number]>([0.5, 0.5, 0.5]);
+  const [outputRGB, setOutputRGB] = useState<[number, number, number] | null>(null);
+  const [applyImage, setApplyImage] = useState<string | null>(null);
+  const [applyImageProcessed, setApplyImageProcessed] = useState<string | null>(null);
+  const applyCanvasRef = useRef<HTMLCanvasElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  // Track original image properties for faithful export
+  const [originalImageType, setOriginalImageType] = useState<string>('image/png');
+  const [originalImageHasAlpha, setOriginalImageHasAlpha] = useState<boolean>(true);
+  const [originalFileName, setOriginalFileName] = useState<string>('');
+  // Image viewer dialog
+  const [imageViewSrc, setImageViewSrc] = useState<string | null>(null);
+  const [imageViewTitle, setImageViewTitle] = useState('');
+
+  // ─── Tab 2: Generate LUT state ───
+  const [srcGamut, setSrcGamut] = useState('sRGB');
+  const [srcTF, setSrcTF] = useState<TransferFunctionName>('sRGB');
+  const [dstGamut, setDstGamut] = useState('DCI_P3');
+  const [dstTF, setDstTF] = useState<TransferFunctionName>('sRGB');
+  const [gridSize, setGridSize] = useState(33);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generateProgress, setGenerateProgress] = useState(0);
+  const [generatedLUT, setGeneratedLUT] = useState<LUT3D | null>(null);
+
+  // ─── Tab 3: Manage LUT state ───
+  const [chainLut1Id, setChainLut1Id] = useState<string>('');
+  const [chainLut2Id, setChainLut2Id] = useState<string>('');
+  const [manageInfoLutId, setManageInfoLutId] = useState<string>('');
+  const [editingLutId, setEditingLutId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState('');
+
+  // ─── Tab 4: Import LUT state ───
+  const [importFormat, setImportFormat] = useState<'cube' | 'csv'>('cube');
+  const [cubeText, setCubeText] = useState('');
+  const [parsedLUT, setParsedLUT] = useState<LUT3D | null>(null);
+  const [parseError, setParseError] = useState('');
+  const importFileRef = useRef<HTMLInputElement>(null);
+  // CSV-specific options
+  const [csvOrder, setCsvOrder] = useState<'rgb' | 'bgr'>('rgb');
+  const [csvBitDepth, setCsvBitDepth] = useState(12);
+  const [csvLineCount, setCsvLineCount] = useState<number | null>(null);
+  // Cube data order option (BGR/RGB)
+  const [cubeOrder, setCubeOrder] = useState<'bgr' | 'rgb'>('bgr');
+  // Import added feedback
+  const [importAddedSuccess, setImportAddedSuccess] = useState(false);
+
+  // ─── Tab 5: Export LUT state ───
+  const [exportSelectedLutId, setExportSelectedLutId] = useState<string>('');
+  const [cubePreview, setCubePreview] = useState('');
+  const [copySuccess, setCopySuccess] = useState(false);
+  // Export format & options
+  const [exportFormat, setExportFormat] = useState<'cube' | 'csv'>('cube');
+  const [exportChannelOrder, setExportChannelOrder] = useState<'bgr' | 'rgb'>('bgr');
+  const [exportCsvBitDepth, setExportCsvBitDepth] = useState<number>(0); // 0 = float, 8/10/12/16 = integer
+  // Original image reference for full-res export
+  const [originalImageElement, setOriginalImageElement] = useState<HTMLImageElement | null>(null);
+
+  // ─── Feature 3: Bit-depth input mode ───
+  type BitDepthMode = 'float' | '8bit' | '10bit';
+  const [inputBitDepth, setInputBitDepth] = useState<BitDepthMode>('float');
+
+  // ─── Feature 1: 5³ LUT table ───
+  const [showLutTable, setShowLutTable] = useState(false);
+  const [lutTable5Data, setLutTable5Data] = useState<LUT3D | null>(null);
+  const [editingCellKey, setEditingCellKey] = useState<string | null>(null);
+  const [editingCellValues, setEditingCellValues] = useState<[number, number, number]>([0, 0, 0]);
+  const [activeBSlice, setActiveBSlice] = useState<number>(0);
+  const [upsampleSuccess, setUpsampleSuccess] = useState(false);
+  const [isUpsampling, setIsUpsampling] = useState(false);
+  // B 切片可输入模式: 0~4 整数索引
+  const [bSliceInput, setBSliceInput] = useState<string>('0');
+
+  // ─── Feature 2: Gamut adjustment ───
+  const [gamutAdjLutId, setGamutAdjLutId] = useState<string>('');
+  const [gamutAdjNewGamut, setGamutAdjNewGamut] = useState<string>('DCI_P3');
+  const [gamutAdjNewTF, setGamutAdjNewTF] = useState<TransferFunctionName>('sRGB');
+  const [gamutAdjResult, setGamutAdjResult] = useState<string>('');
+  const [isGamutAdjusting, setIsGamutAdjusting] = useState(false);
+
+  // ─── Generate LUT: name dialog ───
+  const [showGenerateNameDialog, setShowGenerateNameDialog] = useState(false);
+  const [generateLutName, setGenerateLutName] = useState('');
+
+  // ─── Delete LUT: confirmation dialog ───
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [deleteConfirmName, setDeleteConfirmName] = useState('');
+
+  // ─── Tab: Chromaticity Upsampling state ───
+  const [xyLvData5, setXyLvData5] = useState<Float32Array | null>(null); // 125*6 = 750 floats: R,G,B,x,y,Lv per row
+  const [xyLvUpData17, setXyLvUpData17] = useState<Float32Array | null>(null); // 4913*6 floats
+  const [xyLvGamut, setXyLvGamut] = useState('sRGB');
+  const [xyLvTF, setXyLvTF] = useState<TransferFunctionName>('sRGB');
+  const [xyLvImportText, setXyLvImportText] = useState('');
+  const [xyLvParseError, setXyLvParseError] = useState('');
+  const [isXyLvUpsampling, setIsXyLvUpsampling] = useState(false);
+  const [xyLvConvertSuccess, setXyLvConvertSuccess] = useState(false);
+  const [xyLvConvertError, setXyLvConvertError] = useState('');
+  const xyLvFileRef = useRef<HTMLInputElement>(null);
+
+  const gamutNames = getGamutNames();
+  const tfNames = getTransferFunctionNames();
+
+  // ──────────────────────────────────────────
+  // Tab 1: Apply LUT handlers
+  // ──────────────────────────────────────────
+
+  // ─── Feature 3: Bit-depth conversion helpers ───
+  const bitDepthMax: Record<BitDepthMode, number> = { float: 1, '8bit': 255, '10bit': 1023 };
+  const bitDepthStep: Record<BitDepthMode, number> = { float: 0.01, '8bit': 1, '10bit': 1 };
+  const bitDepthLabel: Record<BitDepthMode, string> = {
+    float: '归一化浮点 (0–1)',
+    '8bit': '8-bit 整数 (0–255)',
+    '10bit': '10-bit 整数 (0–1023)',
+  };
+
+  const toDisplayVal = useCallback((v: number, mode: BitDepthMode) => {
+    if (mode === 'float') return parseFloat(v.toFixed(4));
+    return Math.round(v * bitDepthMax[mode]);
+  }, []);
+
+  const fromInputVal = useCallback((v: number, mode: BitDepthMode) => {
+    if (mode === 'float') return clamp(v, 0, 1);
+    return clamp(v / bitDepthMax[mode], 0, 1);
+  }, []);
+
+  const handleBitDepthChange = useCallback((newMode: BitDepthMode) => {
+    setInputBitDepth(newMode);
+  }, []);
+
+  const handleApplyRGB = useCallback(() => {
+    const entry = lutLibrary.get(applySelectedLutId);
+    if (!entry) return;
+    const lut = libraryToLUT3D(entry);
+    const result = applyLUT3D(lut, inputR, inputG, inputB);
+    setOutputRGB(result);
+  }, [applySelectedLutId, inputR, inputG, inputB, lutLibrary]);
+
+  const handleApplyImageUpload = useCallback(
+    (file: File) => {
+      const entry = lutLibrary.get(applySelectedLutId);
+      if (!entry) return;
+      const lut = libraryToLUT3D(entry);
+
+      // Store original image metadata for faithful export
+      setOriginalImageType(file.type || 'image/png');
+      setOriginalFileName(file.name);
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const dataUrl = e.target?.result as string;
+        setApplyImage(dataUrl);
+        setApplyImageProcessed(null);
+
+        const img = new Image();
+        img.onload = () => {
+          // Store original image element for full-res export later
+          setOriginalImageElement(img);
+
+          const canvas = applyCanvasRef.current;
+          if (!canvas) return;
+          // Use full original resolution for processing
+          canvas.width = img.width;
+          canvas.height = img.height;
+
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return;
+
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+          // Detect if original image has alpha channel (check if any alpha value is not 255)
+          let hasAlpha = false;
+          for (let i = 3; i < imageData.data.length; i += 4) {
+            if (imageData.data[i] !== 255) {
+              hasAlpha = true;
+              break;
+            }
+          }
+          setOriginalImageHasAlpha(hasAlpha);
+
+          const processed = applyLUTToImageData(lut, imageData);
+          ctx.putImageData(processed, 0, 0);
+
+          // Export in original format, preserving channel count
+          const mimeType = file.type || 'image/png';
+          let exportDataUrl: string;
+          if (hasAlpha || mimeType === 'image/png') {
+            // Keep alpha if present, or PNG format
+            exportDataUrl = canvas.toDataURL(mimeType);
+          } else {
+            // No alpha: create RGB-only output (3 channel)
+            const rgbCanvas = document.createElement('canvas');
+            rgbCanvas.width = img.width;
+            rgbCanvas.height = img.height;
+            const rgbCtx = rgbCanvas.getContext('2d')!;
+            rgbCtx.drawImage(canvas, 0, 0);
+            exportDataUrl = rgbCanvas.toDataURL(mimeType, 0.95);
+          }
+          setApplyImageProcessed(exportDataUrl);
+        };
+        img.src = dataUrl;
+      };
+      reader.readAsDataURL(file);
+    },
+    [applySelectedLutId, lutLibrary]
+  );
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  }, []);
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      setIsDragging(false);
+      const file = e.dataTransfer.files[0];
+      if (file && file.type.startsWith('image/')) {
+        handleApplyImageUpload(file);
+      }
+    },
+    [handleApplyImageUpload]
+  );
+
+  const handleExportImage = useCallback((dataUrl: string, filename: string) => {
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }, []);
+
+  const handleOpenImageView = useCallback((src: string, title: string) => {
+    setImageViewSrc(src);
+    setImageViewTitle(title);
+  }, []);
+
+  // ──────────────────────────────────────────
+  // Tab 2: Generate LUT handlers
+  // ──────────────────────────────────────────
+
+  // Generate a unique LUT name with incremental counter
+  const generateUniqueLutName = useCallback((baseName: string) => {
+    const existingNames = new Set(Array.from(lutLibrary.values()).map((e) => e.name));
+    if (!existingNames.has(baseName)) return baseName;
+    let counter = 2;
+    while (existingNames.has(`${baseName} #${counter}`)) {
+      counter++;
+    }
+    return `${baseName} #${counter}`;
+  }, [lutLibrary]);
+
+  const handleGenerateClick = useCallback(() => {
+    // Show name dialog with a suggested name
+    const baseName = `${srcGamut} → ${dstGamut}`;
+    const uniqueName = generateUniqueLutName(baseName);
+    setGenerateLutName(uniqueName);
+    setShowGenerateNameDialog(true);
+  }, [srcGamut, dstGamut, generateUniqueLutName]);
+
+  const handleGenerateConfirm = useCallback(() => {
+    setShowGenerateNameDialog(false);
+    setIsGenerating(true);
+    setGenerateProgress(0);
+    setGeneratedLUT(null);
+
+    const customName = generateLutName.trim() || `${srcGamut} → ${dstGamut}`;
+
+    // Use requestAnimationFrame for progress feedback
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        try {
+          setGenerateProgress(30);
+          const lut = createColorSpaceLUT(gridSize, srcGamut, srcTF, dstGamut, dstTF);
+          setGenerateProgress(80);
+
+          // Store in library with custom name
+          const id = generateId();
+          addLUT(id, {
+            name: customName,
+            size: lut.size,
+            data: lut.data,
+            srcGamut: lut.srcGamut,
+            dstGamut: lut.dstGamut,
+          });
+
+          setGenerateProgress(100);
+          setGeneratedLUT({ ...lut, name: customName });
+
+          // Auto-select for apply tab
+          setApplySelectedLutId(id);
+          setExportSelectedLutId(id);
+        } catch (err) {
+          console.error('LUT generation error:', err);
+        } finally {
+          setTimeout(() => {
+            setIsGenerating(false);
+          }, 300);
+        }
+      }, 50);
+    });
+  }, [gridSize, srcGamut, srcTF, dstGamut, dstTF, addLUT, generateLutName]);
+
+  // ──────────────────────────────────────────
+  // Tab 4: Manage LUT handlers
+  // ──────────────────────────────────────────
+
+  // ─── Feature 1: 5³ LUT table handlers ───
+  const handleShowLutTable = useCallback(() => {
+    if (!lutTable5Data) {
+      const lut5 = createLUT3D(5, '5³ 编辑 LUT');
+      setLutTable5Data(lut5);
+    }
+    setShowLutTable(prev => !prev);
+  }, [lutTable5Data]);
+
+  const handleUpsampleLUT = useCallback(() => {
+    if (!lutTable5Data || isUpsampling) return;
+    setIsUpsampling(true);
+    // 使用 requestAnimationFrame 提供点击反馈
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        try {
+          const upsampled = upsampleLUT(lutTable5Data, 17);
+          const id = generateId();
+          addLUT(id, {
+            name: upsampled.name,
+            size: upsampled.size,
+            data: upsampled.data,
+            srcGamut: upsampled.srcGamut,
+            dstGamut: upsampled.dstGamut,
+          });
+          setApplySelectedLutId(id);
+          setExportSelectedLutId(id);
+          setUpsampleSuccess(true);
+          setTimeout(() => setUpsampleSuccess(false), 3000);
+        } finally {
+          setIsUpsampling(false);
+        }
+      }, 100);
+    });
+  }, [lutTable5Data, addLUT, isUpsampling]);
+
+  const handleLutCellClick = useCallback((r: number, g: number, b: number) => {
+    const key = `${r}-${g}-${b}`;
+    setEditingCellKey(key);
+    if (lutTable5Data) {
+      const idx = (b * 5 * 5 + g * 5 + r) * 3;
+      setEditingCellValues([lutTable5Data.data[idx], lutTable5Data.data[idx + 1], lutTable5Data.data[idx + 2]]);
+    }
+  }, [lutTable5Data]);
+
+  const handleLutCellSave = useCallback(() => {
+    if (!lutTable5Data || !editingCellKey) return;
+    const [r, g, b] = editingCellKey.split('-').map(Number);
+    const newData = new Float32Array(lutTable5Data.data);
+    const idx = (b * 5 * 5 + g * 5 + r) * 3;
+    newData[idx] = clamp(editingCellValues[0], 0, 1);
+    newData[idx + 1] = clamp(editingCellValues[1], 0, 1);
+    newData[idx + 2] = clamp(editingCellValues[2], 0, 1);
+    setLutTable5Data({ ...lutTable5Data, data: newData });
+    setEditingCellKey(null);
+  }, [lutTable5Data, editingCellKey, editingCellValues]);
+
+  // ─── Feature 2: Gamut adjustment handler ───
+  const handleGamutAdjust = useCallback(() => {
+    const entry = lutLibrary.get(gamutAdjLutId);
+    if (!entry || isGamutAdjusting) return;
+    setIsGamutAdjusting(true);
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        const lut = libraryToLUT3D(entry);
+        try {
+          const adjusted = adjustLUTGamut(lut, gamutAdjNewGamut, gamutAdjNewTF);
+          const id = generateId();
+          addLUT(id, {
+            name: adjusted.name,
+            size: adjusted.size,
+            data: adjusted.data,
+            srcGamut: adjusted.srcGamut,
+            dstGamut: adjusted.dstGamut,
+          });
+          setManageInfoLutId(id);
+          setApplySelectedLutId(id);
+          setExportSelectedLutId(id);
+          setGamutAdjResult(`色域调整成功: ${lut.dstGamut || 'sRGB'} → ${gamutAdjNewGamut}`);
+          setTimeout(() => setGamutAdjResult(''), 4000);
+        } catch (err) {
+          setGamutAdjResult(`调整失败: ${err instanceof Error ? err.message : '未知错误'}`);
+          setTimeout(() => setGamutAdjResult(''), 5000);
+        } finally {
+          setIsGamutAdjusting(false);
+        }
+      }, 100);
+    });
+  }, [gamutAdjLutId, gamutAdjNewGamut, gamutAdjNewTF, lutLibrary, addLUT, isGamutAdjusting]);
+
+  const handleChain = useCallback(() => {
+    const entry1 = lutLibrary.get(chainLut1Id);
+    const entry2 = lutLibrary.get(chainLut2Id);
+    if (!entry1 || !entry2) return;
+
+    const lut1 = libraryToLUT3D(entry1);
+    const lut2 = libraryToLUT3D(entry2);
+
+    try {
+      const chained = chainLUTs(lut1, lut2, 33);
+      const id = generateId();
+      addLUT(id, {
+        name: chained.name,
+        size: chained.size,
+        data: chained.data,
+        srcGamut: chained.srcGamut,
+        dstGamut: chained.dstGamut,
+      });
+      setManageInfoLutId(id);
+      setApplySelectedLutId(id);
+      setExportSelectedLutId(id);
+    } catch (err) {
+      console.error('Chain error:', err);
+    }
+  }, [chainLut1Id, chainLut2Id, lutLibrary, addLUT]);
+
+  const handleDeleteConfirm = useCallback(
+    (id: string) => {
+      removeLUT(id);
+      if (applySelectedLutId === id) setApplySelectedLutId('');
+      if (chainLut1Id === id) setChainLut1Id('');
+      if (chainLut2Id === id) setChainLut2Id('');
+      if (manageInfoLutId === id) setManageInfoLutId('');
+      if (exportSelectedLutId === id) setExportSelectedLutId('');
+      setDeleteConfirmId(null);
+      setDeleteConfirmName('');
+    },
+    [removeLUT, applySelectedLutId, chainLut1Id, chainLut2Id, manageInfoLutId, exportSelectedLutId]
+  );
+
+  // ──────────────────────────────────────────
+  // Tab 4: Import LUT handlers
+  // ──────────────────────────────────────────
+
+  const handleParse = useCallback(() => {
+    setParseError('');
+    setParsedLUT(null);
+    try {
+      if (importFormat === 'cube') {
+        const lut = parseCubeFile(cubeText, cubeOrder);
+        setParsedLUT(lut);
+      } else {
+        const lut = parseCSVLut(cubeText, {
+          bitDepth: csvBitDepth,
+          order: csvOrder,
+        });
+        setParsedLUT(lut);
+      }
+    } catch (err) {
+      setParseError(err instanceof Error ? err.message : '解析失败');
+    }
+  }, [cubeText, importFormat, csvBitDepth, csvOrder, cubeOrder]);
+
+  const handleAddImportedLUT = useCallback(() => {
+    if (!parsedLUT) return;
+    const id = generateId();
+    addLUT(id, {
+      name: parsedLUT.name,
+      size: parsedLUT.size,
+      data: parsedLUT.data,
+      srcGamut: parsedLUT.srcGamut,
+      dstGamut: parsedLUT.dstGamut,
+    });
+    setApplySelectedLutId(id);
+    setExportSelectedLutId(id);
+    // Show success feedback
+    setImportAddedSuccess(true);
+    setTimeout(() => setImportAddedSuccess(false), 3000);
+  }, [parsedLUT, addLUT]);
+
+  const handleImportFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string;
+      setCubeText(text);
+      setParsedLUT(null);
+      setParseError('');
+
+      // Auto-detect format from file extension
+      const ext = file.name.split('.').pop()?.toLowerCase();
+      if (ext === 'csv') {
+        setImportFormat('csv');
+        // Count lines for info display
+        const lines = text.split('\n').filter(l => l.trim().length > 0);
+        setCsvLineCount(lines.length);
+        // Auto-detect bit depth from max value
+        let maxVal = 0;
+        for (const line of lines) {
+          const parts = line.split(',').map(Number);
+          if (parts.every(p => !isNaN(p))) {
+            maxVal = Math.max(maxVal, ...parts);
+          }
+        }
+        if (maxVal > 0) {
+          // Find the most likely bit depth
+          if (maxVal <= 255) setCsvBitDepth(8);
+          else if (maxVal <= 1023) setCsvBitDepth(10);
+          else if (maxVal <= 4095) setCsvBitDepth(12);
+          else setCsvBitDepth(16);
+        }
+      } else {
+        setImportFormat('cube');
+        setCsvLineCount(null);
+      }
+    };
+    reader.readAsText(file);
+    // Reset the input so re-selecting the same file works
+    e.target.value = '';
+  }, []);
+
+  // ──────────────────────────────────────────
+  // Tab 6: Export LUT handlers
+  // ──────────────────────────────────────────
+
+  useEffect(() => {
+    const entry = lutLibrary.get(exportSelectedLutId);
+    if (!entry) {
+      setCubePreview('');
+      return;
+    }
+    const lut = libraryToLUT3D(entry);
+    let content = '';
+    if (exportFormat === 'cube') {
+      content = exportLUTToCube(lut, exportChannelOrder);
+    } else {
+      content = exportLUTToCSV(lut, { channelOrder: exportChannelOrder, bitDepth: exportCsvBitDepth || undefined });
+    }
+    const lines = content.split('\n');
+    setCubePreview(lines.slice(0, 50).join('\n') + (lines.length > 50 ? '\n...' : ''));
+  }, [exportSelectedLutId, lutLibrary, exportFormat, exportChannelOrder, exportCsvBitDepth]);
+
+  const handleDownload = useCallback(() => {
+    const entry = lutLibrary.get(exportSelectedLutId);
+    if (!entry) return;
+    const lut = libraryToLUT3D(entry);
+    let content = '';
+    let filename = '';
+    let mimeType = '';
+    if (exportFormat === 'cube') {
+      content = exportLUTToCube(lut, exportChannelOrder);
+      filename = `${lut.name.replace(/\s+/g, '_')}.cube`;
+      mimeType = 'text/plain';
+    } else {
+      content = exportLUTToCSV(lut, { channelOrder: exportChannelOrder, bitDepth: exportCsvBitDepth || undefined });
+      filename = `${lut.name.replace(/\s+/g, '_')}.csv`;
+      mimeType = 'text/csv';
+    }
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [exportSelectedLutId, lutLibrary, exportFormat, exportChannelOrder, exportCsvBitDepth]);
+
+  const handleCopy = useCallback(async () => {
+    const entry = lutLibrary.get(exportSelectedLutId);
+    if (!entry) return;
+    const lut = libraryToLUT3D(entry);
+    let content = '';
+    if (exportFormat === 'cube') {
+      content = exportLUTToCube(lut, exportChannelOrder);
+    } else {
+      content = exportLUTToCSV(lut, { channelOrder: exportChannelOrder, bitDepth: exportCsvBitDepth || undefined });
+    }
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopySuccess(true);
+      setTimeout(() => setCopySuccess(false), 2000);
+    } catch {
+      // Fallback
+      const textarea = document.createElement('textarea');
+      textarea.value = content;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      setCopySuccess(true);
+      setTimeout(() => setCopySuccess(false), 2000);
+    }
+  }, [exportSelectedLutId, lutLibrary, exportFormat, exportChannelOrder, exportCsvBitDepth]);
+
+  // ──────────────────────────────────────────
+  // Tab: Chromaticity Upsampling handlers
+  // ──────────────────────────────────────────
+
+  const handleXyLvParse = useCallback(() => {
+    setXyLvParseError('');
+    setXyLvData5(null);
+    try {
+      const lines = xyLvImportText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+      if (lines.length !== 125) {
+        setXyLvParseError(`需要 125 行 (5³)，实际 ${lines.length} 行`);
+        return;
+      }
+      const data = new Float32Array(125 * 6);
+      for (let i = 0; i < 125; i++) {
+        const parts = lines[i].split(/[,\s]+/).map(Number);
+        if (parts.length < 6 || parts.some(p => isNaN(p))) {
+          setXyLvParseError(`第 ${i + 1} 行格式错误：需要 6 个数值 (R,G,B,x,y,Lv)`);
+          return;
+        }
+        data[i * 6 + 0] = parts[0]; // R
+        data[i * 6 + 1] = parts[1]; // G
+        data[i * 6 + 2] = parts[2]; // B
+        data[i * 6 + 3] = parts[3]; // x
+        data[i * 6 + 4] = parts[4]; // y
+        data[i * 6 + 5] = parts[5]; // Lv
+      }
+      setXyLvData5(data);
+      setXyLvUpData17(null);
+    } catch (err) {
+      setXyLvParseError(err instanceof Error ? err.message : '解析失败');
+    }
+  }, [xyLvImportText]);
+
+  const handleXyLvUpsample = useCallback(() => {
+    if (!xyLvData5 || isXyLvUpsampling) return;
+    setIsXyLvUpsampling(true);
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        try {
+          // ── Step 1: Detect the scale of R, G, B values ──
+          let maxRGB = 0;
+          for (let i = 0; i < 125; i++) {
+            maxRGB = Math.max(maxRGB, xyLvData5[i * 6 + 0], xyLvData5[i * 6 + 1], xyLvData5[i * 6 + 2]);
+          }
+
+          // Map an R/G/B value to a 5³ grid index (0-4)
+          // For 8-bit data (0-255): 0→0, 64→1, 128→2, 192→3, 255→4
+          // For normalized data (0-1): 0→0, 0.25→1, 0.5→2, 0.75→3, 1.0→4
+          const toGridIdx = (val: number): number => {
+            if (maxRGB <= 1) {
+              return Math.round(val * 4);
+            } else {
+              return Math.round(val * 4 / maxRGB);
+            }
+          };
+
+          // ── Step 2: Detect iteration order from first two rows ──
+          // Standard .cube: R-innermost (R changes between row 0 and 1)
+          // Some formats: B-innermost (B changes between row 0 and 1)
+          const r0 = xyLvData5[0], g0 = xyLvData5[1], b0 = xyLvData5[2];
+          const r1 = xyLvData5[6], g1 = xyLvData5[7], b1 = xyLvData5[8];
+          // Check which channel changed between row 0 and row 1
+          const rChanged = (r0 !== r1);
+          const gChanged = (g0 !== g1);
+          const bChanged = (b0 !== b1);
+          // The channel that changes between consecutive rows is the innermost loop variable
+          // Determine loop order: [outermost, middle, innermost] using 0=R, 1=G, 2=B
+          let loopOrder: [number, number, number];
+          if (rChanged && !gChanged && !bChanged) {
+            // R is innermost → standard .cube order: B-outer, G-mid, R-inner
+            loopOrder = [2, 1, 0];
+          } else if (bChanged && !rChanged && !gChanged) {
+            // B is innermost → R-outer, G-mid, B-inner
+            loopOrder = [0, 1, 2];
+          } else if (gChanged && !rChanged && !bChanged) {
+            // G is innermost → R-outer, B-mid, G-inner
+            loopOrder = [0, 2, 1];
+          } else {
+            // Fallback: assume standard .cube order
+            loopOrder = [2, 1, 0];
+          }
+
+          // ── Step 3: Build three 5³ LUTs for x, y, Lv channels ──
+          const makeLut5 = (channelOffset: number): LUT3D => {
+            const data = new Float32Array(125 * 3);
+            data.fill(NaN);
+            for (let i = 0; i < 125; i++) {
+              const ri = clamp(toGridIdx(xyLvData5[i * 6 + 0]), 0, 4);
+              const gi = clamp(toGridIdx(xyLvData5[i * 6 + 1]), 0, 4);
+              const bi = clamp(toGridIdx(xyLvData5[i * 6 + 2]), 0, 4);
+              const val = xyLvData5[i * 6 + channelOffset];
+              // LUT3D internal storage: (bi * 25 + gi * 5 + ri) * 3
+              const idx = (bi * 5 * 5 + gi * 5 + ri) * 3;
+              data[idx + 0] = val;
+              data[idx + 1] = val;
+              data[idx + 2] = val;
+            }
+            // Fill any unmapped positions with 0
+            for (let i = 0; i < data.length; i++) {
+              if (isNaN(data[i])) data[i] = 0;
+            }
+            return {
+              name: `xyLv ch${channelOffset}`,
+              size: 5,
+              data,
+              inputRange: { min: 0, max: 1 },
+              outputRange: { min: 0, max: 1 },
+            };
+          };
+
+          const lutX = makeLut5(3);
+          const lutY = makeLut5(4);
+          const lutLv = makeLut5(5);
+
+          // ── Step 4: Upsample each to 17³ ──
+          // x, y, Lv values are NOT normalized - they keep their original scale
+          const upX = upsampleLUT(lutX, 17);
+          const upY = upsampleLUT(lutY, 17);
+          const upLv = upsampleLUT(lutLv, 17);
+
+          // ── Step 5: Combine back into 17³ xyLv data ──
+          // Output in the same iteration order as the input data
+          const upData = new Float32Array(4913 * 6);
+
+          // Helper to compute R/G/B coordinate for a grid index (0-16)
+          // Round to integer for bit-depth modes (8-bit, 10-bit, etc.)
+          const coordVal = (idx: number): number => {
+            if (maxRGB <= 1) return idx / 16;
+            return Math.round((idx / 16) * maxRGB);
+          };
+
+          // Iterate in the detected loop order
+          const [outer, mid, inner] = loopOrder;
+          let outRow = 0;
+          for (let oi = 0; oi < 17; oi++) {
+            for (let mi = 0; mi < 17; mi++) {
+              for (let ii = 0; ii < 17; ii++) {
+                // Map loop indices to R, G, B indices
+                const indices = [0, 0, 0];
+                indices[outer] = oi;
+                indices[mid] = mi;
+                indices[inner] = ii;
+                const ri = indices[0], gi = indices[1], bi = indices[2];
+
+                // Access the LUT data (internal: B-outer, G-mid, R-inner)
+                const lutIdx = (bi * 17 * 17 + gi * 17 + ri) * 3;
+                const outIdx = outRow * 6;
+
+                // R, G, B coordinates in original scale
+                upData[outIdx + 0] = coordVal(ri);
+                upData[outIdx + 1] = coordVal(gi);
+                upData[outIdx + 2] = coordVal(bi);
+                // x, y, Lv interpolated values (NOT normalized)
+                upData[outIdx + 3] = upX.data[lutIdx];
+                upData[outIdx + 4] = upY.data[lutIdx];
+                upData[outIdx + 5] = upLv.data[lutIdx];
+
+                outRow++;
+              }
+            }
+          }
+          setXyLvUpData17(upData);
+        } finally {
+          setIsXyLvUpsampling(false);
+        }
+      }, 100);
+    });
+  }, [xyLvData5, isXyLvUpsampling]);
+
+  const handleXyLvToRGB = useCallback(() => {
+    const srcData = xyLvUpData17 || xyLvData5;
+    if (!srcData) return;
+    const size = srcData === xyLvUpData17 ? 17 : 5;
+    const total = size * size * size;
+
+    setXyLvConvertError('');
+    try {
+      // Detect max R/G/B coordinate to map to grid indices
+      let maxCoord = 0;
+      for (let i = 0; i < total; i++) {
+        maxCoord = Math.max(maxCoord, srcData[i * 6 + 0], srcData[i * 6 + 1], srcData[i * 6 + 2]);
+      }
+
+      // ── Step 1: xyLv → XYZ → linear RGB ──
+      // Use xyzToRgb with tf='linear' to get linear RGB (no OETF encoding)
+      const linearRgbArray = new Float32Array(total * 3);
+      let maxLinear = 0;
+
+      for (let i = 0; i < total; i++) {
+        const r = srcData[i * 6 + 0];
+        const g = srcData[i * 6 + 1];
+        const b = srcData[i * 6 + 2];
+        const x = srcData[i * 6 + 3];
+        const y = srcData[i * 6 + 4];
+        const Lv = srcData[i * 6 + 5];
+
+        // Map R, G, B coordinates to grid indices (0 to size-1)
+        const ri = maxCoord <= 1 ? Math.round(r * (size - 1)) : Math.round(r / maxCoord * (size - 1));
+        const gi = maxCoord <= 1 ? Math.round(g * (size - 1)) : Math.round(g / maxCoord * (size - 1));
+        const bi = maxCoord <= 1 ? Math.round(b * (size - 1)) : Math.round(b / maxCoord * (size - 1));
+
+        // LUT3D internal storage: (bi * size² + gi * size + ri) * 3
+        const lutIdx = (bi * size * size + gi * size + ri) * 3;
+
+        // xyLv → XYZ: X = (x/y)*Lv, Y = Lv, Z = ((1-x-y)/y)*Lv
+        const { X, Y: Yv, Z } = xyYToXYZ(x, y, Lv);
+
+        // XYZ → linear RGB (tf='linear' means no OETF, returns raw linear values)
+        const [lr, lg, lb] = xyzToRgb(X, Yv, Z, xyLvGamut, 'linear');
+
+        linearRgbArray[lutIdx + 0] = lr;
+        linearRgbArray[lutIdx + 1] = lg;
+        linearRgbArray[lutIdx + 2] = lb;
+
+        maxLinear = Math.max(maxLinear, lr, lg, lb);
+      }
+
+      // ── Step 2: Normalize linear RGB to 0-1 by dividing by max ──
+      if (maxLinear <= 0) maxLinear = 1; // avoid division by zero
+      for (let i = 0; i < linearRgbArray.length; i++) {
+        linearRgbArray[i] = linearRgbArray[i] / maxLinear;
+      }
+
+      // ── Step 3: Apply transfer function (OETF) to get non-linear RGB ──
+      const lutData = new Float32Array(total * 3);
+      for (let i = 0; i < total; i++) {
+        const lr = linearRgbArray[i * 3 + 0];
+        const lg = linearRgbArray[i * 3 + 1];
+        const lb = linearRgbArray[i * 3 + 2];
+
+        // Apply OETF: linear → non-linear RGB
+        const [nr, ng, nb] = linearToRgb(
+          clamp(lr, 0, 1),
+          clamp(lg, 0, 1),
+          clamp(lb, 0, 1),
+          xyLvTF
+        );
+
+        lutData[i * 3 + 0] = clamp(nr, 0, 1);
+        lutData[i * 3 + 1] = clamp(ng, 0, 1);
+        lutData[i * 3 + 2] = clamp(nb, 0, 1);
+      }
+
+      const id = generateId();
+      const name = `xyLv→RGB ${xyLvGamut}/${xyLvTF} [${size}³]`;
+      addLUT(id, {
+        name,
+        size,
+        data: lutData,
+        dstGamut: xyLvGamut,
+      });
+      setApplySelectedLutId(id);
+      setExportSelectedLutId(id);
+      setXyLvConvertSuccess(true);
+      setTimeout(() => setXyLvConvertSuccess(false), 3000);
+    } catch (err) {
+      setXyLvConvertError(err instanceof Error ? err.message : '转换失败');
+      setTimeout(() => setXyLvConvertError(''), 5000);
+    }
+  }, [xyLvData5, xyLvUpData17, xyLvGamut, xyLvTF, addLUT]);
+
+  const handleXyLvExport = useCallback(() => {
+    const srcData = xyLvUpData17 || xyLvData5;
+    if (!srcData) return;
+    const size = srcData === xyLvUpData17 ? 17 : 5;
+    const total = size * size * size;
+    const lines: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const r = srcData[i * 6 + 0];
+      const g = srcData[i * 6 + 1];
+      const b = srcData[i * 6 + 2];
+      const x = srcData[i * 6 + 3];
+      const y = srcData[i * 6 + 4];
+      const Lv = srcData[i * 6 + 5];
+      // R,G,B as integers if > 1, otherwise as floats; x,y,Lv always as decimals
+      const fmtRGB = (v: number) => v > 1 ? Math.round(v).toString() : v.toFixed(6);
+      lines.push(`${fmtRGB(r)},${fmtRGB(g)},${fmtRGB(b)},${x.toFixed(6)},${y.toFixed(6)},${Lv.toFixed(6)}`);
+    }
+    const csvStr = lines.join('\n');
+    const blob = new Blob([csvStr], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `xyLv_${size}cubed.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [xyLvData5, xyLvUpData17]);
+
+  // ──────────────────────────────────────────
+  // Render helpers
+  // ──────────────────────────────────────────
+
+  const renderLutSelector = (
+    label: string,
+    value: string,
+    onValueChange: (v: string) => void,
+    placeholder = '选择 LUT...'
+  ) => (
+    <div className="space-y-2">
+      <Label className="text-sm font-medium">{label}</Label>
+      <Select value={value} onValueChange={onValueChange}>
+        <SelectTrigger className="w-full">
+          <SelectValue placeholder={placeholder} />
+        </SelectTrigger>
+        <SelectContent>
+          {lutEntries.length === 0 && (
+            <SelectItem value="__none" disabled>
+              库中暂无 LUT
+            </SelectItem>
+          )}
+          {lutEntries.map((entry) => (
+            <SelectItem key={entry.id} value={entry.id}>
+              {entry.name} ({entry.size}&sup3;)
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+
+  // ============ RENDER ============
+
+  return (
+    <div className="w-full max-w-5xl mx-auto space-y-6 p-4">
+      <div className="flex items-center gap-3 mb-2">
+        <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 text-white">
+          <Palette className="w-5 h-5" />
+        </div>
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">3D LUT 模块</h1>
+          <p className="text-sm text-muted-foreground">
+            生成、应用、链接、导入和导出 3D 查找表
+          </p>
+        </div>
+      </div>
+
+      <Tabs value={currentTab} onValueChange={(v) => setActiveTab('lut-' + v)} className="w-full">
+        <TabsList className="flex flex-wrap h-auto gap-1">
+          <TabsTrigger value="apply" className="gap-1.5">
+            <Wand2 className="w-4 h-4" />
+            <span>LUT 应用</span>
+          </TabsTrigger>
+          <TabsTrigger value="generate" className="gap-1.5">
+            <Play className="w-4 h-4" />
+            <span>LUT 生成</span>
+          </TabsTrigger>
+          <TabsTrigger value="extract" className="gap-1.5">
+            <Camera className="w-4 h-4" />
+            <span>图片提取3DLUT</span>
+          </TabsTrigger>
+          <TabsTrigger value="manage" className="gap-1.5">
+            <Layers className="w-4 h-4" />
+            <span>LUT 管理</span>
+          </TabsTrigger>
+          <TabsTrigger value="import" className="gap-1.5">
+            <FileUp className="w-4 h-4" />
+            <span>LUT 导入</span>
+          </TabsTrigger>
+          <TabsTrigger value="export" className="gap-1.5">
+            <FileDown className="w-4 h-4" />
+            <span>LUT 导出</span>
+          </TabsTrigger>
+          <TabsTrigger value="upsampling" className="gap-1.5">
+            <Expand className="w-4 h-4" />
+            <span>色度上采样</span>
+          </TabsTrigger>
+        </TabsList>
+
+        {/* ============================== */}
+        {/* TAB 1: Apply LUT               */}
+        {/* ============================== */}
+        <TabsContent value="apply">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Left: Controls */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">应用 LUT 到 RGB 值</CardTitle>
+                <CardDescription>选择一个 LUT 并输入 RGB 值，查看变换后的输出。</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-5">
+                {renderLutSelector('从库中选择 LUT', applySelectedLutId, setApplySelectedLutId)}
+
+                <Separator />
+
+                {/* Feature 3: Bit-depth mode toggle */}
+                <div className="space-y-3">
+                  <Label className="text-sm font-medium">输入 RGB</Label>
+                  <div className="flex gap-1">
+                    {(['float', '8bit', '10bit'] as BitDepthMode[]).map((mode) => (
+                      <Button
+                        key={mode}
+                        variant={inputBitDepth === mode ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-7 px-2.5 text-[11px] flex-1"
+                        onClick={() => handleBitDepthChange(mode)}
+                      >
+                        {bitDepthLabel[mode]}
+                      </Button>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="space-y-1">
+                      <Label className="text-xs text-muted-foreground">红</Label>
+                      <Input
+                        type="number"
+                        step={bitDepthStep[inputBitDepth]}
+                        min={0}
+                        max={bitDepthMax[inputBitDepth]}
+                        value={toDisplayVal(inputR, inputBitDepth)}
+                        onChange={(e) => setInputR(fromInputVal(parseFloat(e.target.value) || 0, inputBitDepth))}
+                        className="h-9"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs text-muted-foreground">绿</Label>
+                      <Input
+                        type="number"
+                        step={bitDepthStep[inputBitDepth]}
+                        min={0}
+                        max={bitDepthMax[inputBitDepth]}
+                        value={toDisplayVal(inputG, inputBitDepth)}
+                        onChange={(e) => setInputG(fromInputVal(parseFloat(e.target.value) || 0, inputBitDepth))}
+                        className="h-9"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs text-muted-foreground">蓝</Label>
+                      <Input
+                        type="number"
+                        step={bitDepthStep[inputBitDepth]}
+                        min={0}
+                        max={bitDepthMax[inputBitDepth]}
+                        value={toDisplayVal(inputB, inputBitDepth)}
+                        onChange={(e) => setInputB(fromInputVal(parseFloat(e.target.value) || 0, inputBitDepth))}
+                        className="h-9"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-xs text-muted-foreground">快捷滑块输入</Label>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant={rgbLinkMode === 'none' ? 'outline' : 'secondary'}
+                        size="sm"
+                        className="h-6 px-2 text-[10px] gap-1"
+                        onClick={() => setRgbLinkMode('none')}
+                        title="独立模式"
+                      >
+                        <Unlink className="w-3 h-3" />
+                      </Button>
+                      <Button
+                        variant={rgbLinkMode === 'sync' ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-6 px-2 text-[10px] gap-1"
+                        onClick={() => {
+                          setRgbLinkMode('sync');
+                          const avg = (inputR + inputG + inputB) / 3;
+                          setInputR(avg);
+                          setInputG(avg);
+                          setInputB(avg);
+                        }}
+                        title="同步联动：三通道始终相同值"
+                      >
+                        <Link2 className="w-3 h-3" />
+                        <span>同步</span>
+                      </Button>
+                      <Button
+                        variant={rgbLinkMode === 'link' ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-6 px-2 text-[10px] gap-1"
+                        onClick={() => {
+                          setRgbLinkMode('link');
+                          setRgbAnchor([inputR, inputG, inputB]);
+                        }}
+                        title="联动：拖动任一滑块，其他通道保持差值同步移动"
+                      >
+                        <Link2 className="w-3 h-3" />
+                        <span>联动</span>
+                      </Button>
+                      <Button
+                        variant={rgbLinkMode === 'ratio' ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-6 px-2 text-[10px] gap-1"
+                        onClick={() => {
+                          setRgbLinkMode('ratio');
+                          setRgbRatioAnchor([inputR, inputG, inputB]);
+                        }}
+                        title="比例模式：拖动任一滑块，所有通道按相同比例缩放"
+                      >
+                        <Link2 className="w-3 h-3" />
+                        <span>比例</span>
+                      </Button>
+                    </div>
+                  </div>
+                  {rgbLinkMode === 'link' && (
+                    <p className="text-[10px] text-muted-foreground bg-muted/50 rounded px-2 py-1">
+                      联动模式：拖动任一滑块，所有通道同步移动相同增量（差值保持不变）
+                    </p>
+                  )}
+                  {rgbLinkMode === 'ratio' && (
+                    <p className="text-[10px] text-muted-foreground bg-muted/50 rounded px-2 py-1">
+                      比例模式：拖动任一滑块，所有通道按相同比例缩放（通道间比例保持不变）
+                    </p>
+                  )}
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs w-4 text-red-500 font-medium">R</span>
+                      <Slider
+                        value={[inputR]}
+                        onValueChange={([v]) => {
+                          setInputR(v);
+                          if (rgbLinkMode === 'sync') {
+                            setInputG(v);
+                            setInputB(v);
+                          } else if (rgbLinkMode === 'link') {
+                            const delta = v - rgbAnchor[0];
+                            setInputG(clamp(rgbAnchor[1] + delta, 0, 1));
+                            setInputB(clamp(rgbAnchor[2] + delta, 0, 1));
+                          } else if (rgbLinkMode === 'ratio') {
+                            const scaleFactor = rgbRatioAnchor[0] === 0 ? 1 : v / rgbRatioAnchor[0];
+                            setInputG(clamp(rgbRatioAnchor[1] * scaleFactor, 0, 1));
+                            setInputB(clamp(rgbRatioAnchor[2] * scaleFactor, 0, 1));
+                          }
+                        }}
+                        min={0}
+                        max={1}
+                        step={0.005}
+                        className="flex-1"
+                      />
+                      <span className="text-xs w-10 text-right text-muted-foreground">
+                        {inputR.toFixed(3)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs w-4 text-green-500 font-medium">G</span>
+                      <Slider
+                        value={[inputG]}
+                        onValueChange={([v]) => {
+                          setInputG(v);
+                          if (rgbLinkMode === 'sync') {
+                            setInputR(v);
+                            setInputB(v);
+                          } else if (rgbLinkMode === 'link') {
+                            const delta = v - rgbAnchor[1];
+                            setInputR(clamp(rgbAnchor[0] + delta, 0, 1));
+                            setInputB(clamp(rgbAnchor[2] + delta, 0, 1));
+                          } else if (rgbLinkMode === 'ratio') {
+                            const scaleFactor = rgbRatioAnchor[1] === 0 ? 1 : v / rgbRatioAnchor[1];
+                            setInputR(clamp(rgbRatioAnchor[0] * scaleFactor, 0, 1));
+                            setInputB(clamp(rgbRatioAnchor[2] * scaleFactor, 0, 1));
+                          }
+                        }}
+                        min={0}
+                        max={1}
+                        step={0.005}
+                        className="flex-1"
+                      />
+                      <span className="text-xs w-10 text-right text-muted-foreground">
+                        {inputG.toFixed(3)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs w-4 text-blue-500 font-medium">B</span>
+                      <Slider
+                        value={[inputB]}
+                        onValueChange={([v]) => {
+                          setInputB(v);
+                          if (rgbLinkMode === 'sync') {
+                            setInputR(v);
+                            setInputG(v);
+                          } else if (rgbLinkMode === 'link') {
+                            const delta = v - rgbAnchor[2];
+                            setInputR(clamp(rgbAnchor[0] + delta, 0, 1));
+                            setInputG(clamp(rgbAnchor[1] + delta, 0, 1));
+                          } else if (rgbLinkMode === 'ratio') {
+                            const scaleFactor = rgbRatioAnchor[2] === 0 ? 1 : v / rgbRatioAnchor[2];
+                            setInputR(clamp(rgbRatioAnchor[0] * scaleFactor, 0, 1));
+                            setInputG(clamp(rgbRatioAnchor[1] * scaleFactor, 0, 1));
+                          }
+                        }}
+                        min={0}
+                        max={1}
+                        step={0.005}
+                        className="flex-1"
+                      />
+                      <span className="text-xs w-10 text-right text-muted-foreground">
+                        {inputB.toFixed(3)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <Button
+                  onClick={handleApplyRGB}
+                  disabled={!applySelectedLutId || lutEntries.length === 0}
+                  className="w-full"
+                >
+                  <Wand2 className="w-4 h-4 mr-2" />
+                  应用 LUT
+                </Button>
+
+                {/* Output results */}
+                {outputRGB && (
+                  <>
+                    <Separator />
+                    <div className="space-y-3">
+                      <Label className="text-sm font-medium">结果</Label>
+                      <div className="flex items-center gap-4 rounded-lg border p-3 bg-muted/30">
+                        <div className="flex flex-col items-center gap-1">
+                          <div
+                            className="w-12 h-12 rounded-md border shadow-sm"
+                            style={{
+                              backgroundColor: rgbToHex(inputR, inputG, inputB),
+                            }}
+                          />
+                          <span className="text-[10px] text-muted-foreground">输入</span>
+                        </div>
+                        <span className="text-lg text-muted-foreground">→</span>
+                        <div className="flex flex-col items-center gap-1">
+                          <div
+                            className="w-12 h-12 rounded-md border shadow-sm"
+                            style={{
+                              backgroundColor: rgbToHex(
+                                clamp(outputRGB[0], 0, 1),
+                                clamp(outputRGB[1], 0, 1),
+                                clamp(outputRGB[2], 0, 1)
+                              ),
+                            }}
+                          />
+                          <span className="text-[10px] text-muted-foreground">输出</span>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <div className="rounded-md border p-2 bg-muted/20">
+                          <span className="text-xs text-muted-foreground block mb-1">输入 ({bitDepthLabel[inputBitDepth]})</span>
+                          <code className="text-xs">
+                            R: {toDisplayVal(inputR, inputBitDepth)} G: {toDisplayVal(inputG, inputBitDepth)} B: {toDisplayVal(inputB, inputBitDepth)}
+                          </code>
+                        </div>
+                        <div className="rounded-md border p-2 bg-muted/20">
+                          <span className="text-xs text-muted-foreground block mb-1">输出 ({bitDepthLabel[inputBitDepth]})</span>
+                          <code className="text-xs">
+                            R: {toDisplayVal(clamp(outputRGB[0], 0, 1), inputBitDepth)} G: {toDisplayVal(clamp(outputRGB[1], 0, 1), inputBitDepth)} B: {toDisplayVal(clamp(outputRGB[2], 0, 1), inputBitDepth)}
+                          </code>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Right: Image Application */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">应用 LUT 到图片</CardTitle>
+                <CardDescription>
+                  上传图片以应用所选 LUT，结果将在画布上渲染。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {!applySelectedLutId && lutEntries.length === 0 && (
+                  <div className="flex items-center gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-sm">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                    请先生成或导入 LUT。
+                  </div>
+                )}
+
+                {/* Drag & Drop area */}
+                <div
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                  className={`relative flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-8 transition-colors cursor-pointer ${
+                    isDragging
+                      ? 'border-primary bg-primary/5'
+                      : 'border-muted-foreground/25 hover:border-muted-foreground/50 hover:bg-muted/30'
+                  }`}
+                  onClick={() => {
+                    if (!applySelectedLutId) return;
+                    const fileInput = document.createElement('input');
+                    fileInput.type = 'file';
+                    fileInput.accept = 'image/*';
+                    fileInput.onchange = (e) => {
+                      const file = (e.target as HTMLInputElement).files?.[0];
+                      if (file) handleApplyImageUpload(file);
+                    };
+                    fileInput.click();
+                  }}
+                >
+                  <Upload className="w-8 h-8 text-muted-foreground/50 mb-2" />
+                  <p className="text-sm text-muted-foreground text-center">
+                    拖放图片到此处，或点击浏览
+                  </p>
+                  <p className="text-xs text-muted-foreground/60 mt-1">
+                    支持 PNG、JPG、WebP 格式
+                  </p>
+                </div>
+
+                {/* Hidden canvas for image processing */}
+                <canvas ref={applyCanvasRef} className="hidden" />
+
+                {/* Image result */}
+                {(applyImage || applyImageProcessed) && (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      {applyImage && (
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <Label className="text-xs text-muted-foreground">
+                              原图
+                              <span className="ml-1 opacity-60">
+                                ({originalImageHasAlpha ? 'RGBA' : 'RGB'})
+                              </span>
+                            </Label>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 px-1.5 text-[10px] gap-1"
+                              onClick={() => {
+                                const ext = originalImageType === 'image/jpeg' ? 'jpg' : originalImageType === 'image/webp' ? 'webp' : 'png';
+                                handleExportImage(applyImage, `original.${ext}`);
+                              }}
+                            >
+                              <Download className="w-3 h-3" />
+                              导出
+                            </Button>
+                          </div>
+                          <div
+                            className="rounded-md border overflow-hidden bg-checkered cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all relative group"
+                            onClick={() => handleOpenImageView(applyImage, '原图')}
+                          >
+                            <img
+                              src={applyImage}
+                              alt="Original"
+                              className="w-full h-auto"
+                              style={{ maxHeight: 200, objectFit: 'contain' }}
+                            />
+                            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center">
+                              <span className="opacity-0 group-hover:opacity-100 transition-opacity text-white text-xs bg-black/60 px-2 py-1 rounded">
+                                点击放大
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      {applyImageProcessed && (
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <Label className="text-xs text-muted-foreground">
+                              LUT 处理后
+                              <span className="ml-1 opacity-60">
+                                ({originalImageHasAlpha ? 'RGBA' : 'RGB'})
+                              </span>
+                            </Label>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 px-1.5 text-[10px] gap-1"
+                              onClick={() => {
+                                const ext = originalImageType === 'image/jpeg' ? 'jpg' : originalImageType === 'image/webp' ? 'webp' : 'png';
+                                handleExportImage(applyImageProcessed, `lut_processed.${ext}`);
+                              }}
+                            >
+                              <Download className="w-3 h-3" />
+                              导出
+                            </Button>
+                          </div>
+                          <div
+                            className="rounded-md border overflow-hidden bg-checkered cursor-pointer hover:ring-2 hover:ring-primary/50 transition-all relative group"
+                            onClick={() => handleOpenImageView(applyImageProcessed, 'LUT 处理后')}
+                          >
+                            <img
+                              src={applyImageProcessed}
+                              alt="Processed"
+                              className="w-full h-auto"
+                              style={{ maxHeight: 200, objectFit: 'contain' }}
+                            />
+                            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center">
+                              <span className="opacity-0 group-hover:opacity-100 transition-opacity text-white text-xs bg-black/60 px-2 py-1 rounded">
+                                点击放大
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Feature 1: 5³ LUT Table Section */}
+          <Card className="mt-6">
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Grid3x3 className="w-4 h-4 text-primary" />
+                  <CardTitle className="text-base">5³ LUT 表格查看与编辑</CardTitle>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1.5 text-xs"
+                  onClick={handleShowLutTable}
+                >
+                  {showLutTable ? '收起' : '展开'}
+                </Button>
+              </div>
+              <CardDescription>
+                查看和编辑 5×5×5 LUT 的 125 个条目，可上采样到 17³ 加入库中。
+              </CardDescription>
+            </CardHeader>
+            {showLutTable && lutTable5Data && (
+              <CardContent className="space-y-4">
+                {/* Upsample button with feedback */}
+                <div className="flex items-center gap-3">
+                  <Button
+                    onClick={handleUpsampleLUT}
+                    className={`gap-2 transition-all duration-300 ${
+                      upsampleSuccess
+                        ? 'bg-green-500 hover:bg-green-600 text-white'
+                        : ''
+                    }`}
+                    size="sm"
+                    disabled={isUpsampling}
+                  >
+                    {isUpsampling ? (
+                      <>
+                        <span className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                        上采样中...
+                      </>
+                    ) : upsampleSuccess ? (
+                      <>
+                        <Check className="w-4 h-4" />
+                        上采样成功！
+                      </>
+                    ) : (
+                      <>
+                        <Expand className="w-4 h-4" />
+                        上采样到 17³
+                      </>
+                    )}
+                  </Button>
+                  <span className="text-xs text-muted-foreground">
+                    当前: 5³ (125 条目) → 17³ (4,913 条目)
+                  </span>
+                </div>
+                {upsampleSuccess && (
+                  <div className="flex items-center gap-2 p-2.5 rounded-lg text-xs bg-green-50 border border-green-200 text-green-700 animate-in fade-in duration-300">
+                    <Check className="w-4 h-4 flex-shrink-0" />
+                    上采样完成！17³ LUT 已添加到库中，可在"应用"和"导出"选项卡中使用。
+                  </div>
+                )}
+
+                {/* Cell editor modal */}
+                {editingCellKey && (
+                  <div className="rounded-lg border border-primary bg-primary/5 p-4 space-y-3">
+                    <Label className="text-sm font-medium">
+                      编辑单元格 ({editingCellKey.split('-').map(Number).join(', ')})
+                    </Label>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className="space-y-1">
+                        <Label className="text-xs text-red-500">R</Label>
+                        <Input
+                          type="number" step={0.01} min={0} max={1}
+                          value={editingCellValues[0]}
+                          onChange={(e) => setEditingCellValues([parseFloat(e.target.value) || 0, editingCellValues[1], editingCellValues[2]])}
+                          className="h-8"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-green-500">G</Label>
+                        <Input
+                          type="number" step={0.01} min={0} max={1}
+                          value={editingCellValues[1]}
+                          onChange={(e) => setEditingCellValues([editingCellValues[0], parseFloat(e.target.value) || 0, editingCellValues[2]])}
+                          className="h-8"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs text-blue-500">B</Label>
+                        <Input
+                          type="number" step={0.01} min={0} max={1}
+                          value={editingCellValues[2]}
+                          onChange={(e) => setEditingCellValues([editingCellValues[0], editingCellValues[1], parseFloat(e.target.value) || 0])}
+                          className="h-8"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button size="sm" onClick={handleLutCellSave} className="gap-1">
+                        <Check className="w-3.5 h-3.5" />
+                        保存
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => setEditingCellKey(null)}>
+                        取消
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {/* B-slice selector */}
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Label className="text-xs text-muted-foreground">B 切片（行 = R, 列 = G）</Label>
+                  </div>
+                  <div className="flex gap-1.5">
+                    {Array.from({ length: 5 }, (_, b) => (
+                      <Button
+                        key={b}
+                        variant={activeBSlice === b ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-8 px-3 text-xs flex-1"
+                        onClick={() => {
+                          setActiveBSlice(b);
+                        }}
+                      >
+                        B={(b / 4).toFixed(2)}
+                      </Button>
+                    ))}
+                  </div>
+
+                  {/* Scrollable table area */}
+                  <ScrollArea className="max-h-96 w-full rounded-md border">
+                    <div className="p-2 space-y-1.5">
+                      {/* Current slice info */}
+                      <div className="flex items-center gap-2">
+                        <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                          B = {(activeBSlice / 4).toFixed(2)}
+                        </Badge>
+                        <span className="text-[10px] text-muted-foreground">
+                          (第 {activeBSlice + 1}/5 切片)
+                        </span>
+                      </div>
+                      {/* Column headers (G values) */}
+                      <div className="flex gap-0.5">
+                        <div className="w-12 flex-shrink-0" />
+                        {Array.from({ length: 5 }, (_, g) => (
+                          <div key={g} className="flex-1 text-center text-[10px] text-muted-foreground font-medium">
+                            G={(g / 4).toFixed(2)}
+                          </div>
+                        ))}
+                      </div>
+                      {/* Rows (R values) for current B slice */}
+                      {Array.from({ length: 5 }, (_, r) => {
+                        const rVal = r / 4;
+                        const bVal = activeBSlice / 4;
+                        return (
+                          <div key={r} className="flex gap-0.5">
+                            <div className="w-12 flex-shrink-0 text-[10px] text-muted-foreground flex items-center justify-end pr-1">
+                              R={rVal.toFixed(2)}
+                            </div>
+                            {Array.from({ length: 5 }, (_, g) => {
+                              const gVal = g / 4;
+                              const idx = (activeBSlice * 5 * 5 + g * 5 + r) * 3;
+                              const or = lutTable5Data.data[idx];
+                              const og = lutTable5Data.data[idx + 1];
+                              const ob = lutTable5Data.data[idx + 2];
+                              const cellKey = `${r}-${g}-${activeBSlice}`;
+                              const isEditing = editingCellKey === cellKey;
+                              const cr = clamp(Math.round(clamp(or, 0, 1) * 255), 0, 255);
+                              const cg = clamp(Math.round(clamp(og, 0, 1) * 255), 0, 255);
+                              const cb = clamp(Math.round(clamp(ob, 0, 1) * 255), 0, 255);
+                              return (
+                                <button
+                                  key={g}
+                                  className={`flex-1 h-10 rounded border text-[8px] leading-tight p-0.5 transition-colors cursor-pointer hover:ring-1 hover:ring-primary ${isEditing ? 'ring-2 ring-primary' : ''}`}
+                                  style={{
+                                    backgroundColor: `rgb(${cr},${cg},${cb})`,
+                                    color: (cr * 0.299 + cg * 0.587 + cb * 0.114) > 128 ? '#000' : '#fff',
+                                  }}
+                                  onClick={() => handleLutCellClick(r, g, activeBSlice)}
+                                  title={`输入: (${rVal.toFixed(2)}, ${gVal.toFixed(2)}, ${bVal.toFixed(2)})\n输出: (${or.toFixed(4)}, ${og.toFixed(4)}, ${ob.toFixed(4)})`}
+                                >
+                                  <span className="block">{or.toFixed(2)}</span>
+                                  <span className="block">{og.toFixed(2)}</span>
+                                  <span className="block">{ob.toFixed(2)}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </ScrollArea>
+                </div>
+              </CardContent>
+            )}
+          </Card>
+        </TabsContent>
+
+        {/* ============================== */}
+        {/* TAB 2: Generate LUT            */}
+        {/* ============================== */}
+        <TabsContent value="generate">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">生成 3D LUT</CardTitle>
+                <CardDescription>
+                  从色彩空间转换创建 3D LUT。选择源和目标色域及传输函数。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-5">
+                {/* Source */}
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="text-xs">
+                      源
+                    </Badge>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">色域</Label>
+                      <Select value={srcGamut} onValueChange={setSrcGamut}>
+                        <SelectTrigger className="w-full h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {gamutNames.map((g) => (
+                            <SelectItem key={g} value={g}>
+                              {g}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">传输函数</Label>
+                      <Select value={srcTF} onValueChange={(v) => setSrcTF(v as TransferFunctionName)}>
+                        <SelectTrigger className="w-full h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {tfNames.map((tf) => (
+                            <SelectItem key={tf} value={tf}>
+                              {tf}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                </div>
+
+                <Separator />
+
+                {/* Target */}
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="text-xs">
+                      目标
+                    </Badge>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">色域</Label>
+                      <Select value={dstGamut} onValueChange={setDstGamut}>
+                        <SelectTrigger className="w-full h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {gamutNames.map((g) => (
+                            <SelectItem key={g} value={g}>
+                              {g}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">传输函数</Label>
+                      <Select value={dstTF} onValueChange={(v) => setDstTF(v as TransferFunctionName)}>
+                        <SelectTrigger className="w-full h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {tfNames.map((tf) => (
+                            <SelectItem key={tf} value={tf}>
+                              {tf}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                </div>
+
+                <Separator />
+
+                {/* Grid size */}
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium">网格大小</Label>
+                  <Select value={String(gridSize)} onValueChange={(v) => setGridSize(Number(v))}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="17">17 &times; 17 &times; 17 (4,913 条目)</SelectItem>
+                      <SelectItem value="33">33 &times; 33 &times; 33 (35,937 条目)</SelectItem>
+                      <SelectItem value="65">65 &times; 65 &times; 65 (274,625 条目)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {/* Progress */}
+                {isGenerating && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>正在生成...</span>
+                      <span>{generateProgress}%</span>
+                    </div>
+                    <Progress value={generateProgress} className="h-2" />
+                  </div>
+                )}
+
+                <Button onClick={handleGenerateClick} disabled={isGenerating} className="w-full">
+                  <Play className="w-4 h-4 mr-2" />
+                  {isGenerating ? '正在生成...' : '生成 LUT'}
+                </Button>
+              </CardContent>
+            </Card>
+
+            {/* Right: Generated LUT Info */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">生成结果</CardTitle>
+                <CardDescription>已生成 LUT 的信息。</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {!generatedLUT && !isGenerating && (
+                  <div className="flex flex-col items-center justify-center py-12 text-center text-muted-foreground">
+                    <ImageIcon className="w-10 h-10 mb-3 opacity-30" />
+                    <p className="text-sm">配置转换参数后点击生成。</p>
+                  </div>
+                )}
+
+                {generatedLUT && (
+                  <div className="space-y-4">
+                    <div className="rounded-lg border p-4 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <Check className="w-4 h-4 text-green-500" />
+                        <span className="text-sm font-medium">LUT 生成成功</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <div>
+                          <span className="text-xs text-muted-foreground block">名称</span>
+                          <span className="font-medium">{generatedLUT.name}</span>
+                        </div>
+                        <div>
+                          <span className="text-xs text-muted-foreground block">网格大小</span>
+                          <span className="font-medium">
+                            {generatedLUT.size} &times; {generatedLUT.size} &times; {generatedLUT.size}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-xs text-muted-foreground block">总条目数</span>
+                          <span className="font-medium">
+                            {(generatedLUT.size ** 3).toLocaleString()}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-xs text-muted-foreground block">数据大小</span>
+                          <span className="font-medium">
+                            {((generatedLUT.data.byteLength / 1024).toFixed(1))} KB
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-xs text-muted-foreground block">源</span>
+                          <Badge variant="secondary" className="text-xs">
+                            {srcGamut} / {srcTF}
+                          </Badge>
+                        </div>
+                        <div>
+                          <span className="text-xs text-muted-foreground block">目标</span>
+                          <Badge variant="secondary" className="text-xs">
+                            {dstGamut} / {dstTF}
+                          </Badge>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="text-xs text-muted-foreground bg-muted/30 rounded-md p-3">
+                      <strong>已添加到库中。</strong>现在可以在应用、管理和导出选项卡中使用此 LUT。
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        {/* ============================== */}
+        {/* TAB: Extract 3DLUT from Images */}
+        {/* ============================== */}
+        <TabsContent value="extract">
+          <LutExtractTab />
+        </TabsContent>
+
+        {/* ============================== */}
+        {/* TAB 3: Manage LUTs             */}
+        {/* ============================== */}
+        <TabsContent value="manage">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* LUT Library List */}
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <CardTitle className="text-base">LUT 库</CardTitle>
+                <CardDescription>
+                  点击 LUT 项查看详情与色域调整，再次点击取消选择。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {lutEntries.length === 0 && (
+                  <div className="flex flex-col items-center justify-center py-10 text-center text-muted-foreground">
+                    <Layers className="w-10 h-10 mb-3 opacity-30" />
+                    <p className="text-sm">库中暂无 LUT。</p>
+                    <p className="text-xs mt-1">请先生成或导入 LUT。</p>
+                  </div>
+                )}
+
+                {lutEntries.length > 0 && (
+                  <div className="max-h-[420px] overflow-y-auto space-y-2 pr-1">
+                    {lutEntries.map((entry) => (
+                      <div
+                        key={entry.id}
+                        className={`flex items-center justify-between rounded-lg border p-3 transition-colors cursor-pointer select-none ${
+                          manageInfoLutId === entry.id ? 'border-primary bg-primary/5' : 'hover:bg-muted/30'
+                        }`}
+                        onClick={() => {
+                          // Toggle: click again to deselect and hide gamut adjustment
+                          if (manageInfoLutId === entry.id) {
+                            setManageInfoLutId('');
+                          } else {
+                            setManageInfoLutId(entry.id);
+                          }
+                        }}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          setEditingLutId(entry.id);
+                          setEditingName(entry.name);
+                        }}
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-2.5 h-2.5 rounded-full bg-primary flex-shrink-0" />
+                          <div className="min-w-0">
+                            {editingLutId === entry.id ? (
+                              <input
+                                type="text"
+                                value={editingName}
+                                onChange={(e) => setEditingName(e.target.value)}
+                                onBlur={() => {
+                                  const trimmed = editingName.trim();
+                                  if (trimmed && trimmed !== entry.name) {
+                                    renameLUT(entry.id, trimmed);
+                                  }
+                                  setEditingLutId(null);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    const trimmed = editingName.trim();
+                                    if (trimmed && trimmed !== entry.name) {
+                                      renameLUT(entry.id, trimmed);
+                                    }
+                                    setEditingLutId(null);
+                                  }
+                                  if (e.key === 'Escape') {
+                                    setEditingLutId(null);
+                                  }
+                                }}
+                                autoFocus
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-sm font-medium bg-muted border rounded px-1.5 py-0.5 w-full max-w-[200px] focus:outline-none focus:ring-1 focus:ring-primary"
+                              />
+                            ) : (
+                              <p className="text-sm font-medium truncate">{entry.name}</p>
+                            )}
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                                {entry.size}&sup3;
+                              </Badge>
+                              {entry.srcGamut && <span>{entry.srcGamut}</span>}
+                              {entry.srcGamut && entry.dstGamut && <span>&rarr;</span>}
+                              {entry.dstGamut && <span>{entry.dstGamut}</span>}
+                            </div>
+                            {entry.createdAt && (
+                              <div className="text-[10px] text-muted-foreground/60 mt-0.5">
+                                {new Date(entry.createdAt).toLocaleString('zh-CN', {
+                                  month: '2-digit',
+                                  day: '2-digit',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 w-8 p-0"
+                            onClick={() => {
+                              setEditingLutId(entry.id);
+                              setEditingName(entry.name);
+                            }}
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive hover:text-destructive h-8 w-8 p-0"
+                            onClick={() => {
+                              setDeleteConfirmId(entry.id);
+                              setDeleteConfirmName(entry.name);
+                            }}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Feature 2: Gamut Adjustment — only shown when a LUT is selected */}
+                {manageInfoLutId && lutLibrary.get(manageInfoLutId) && (
+                  <>
+                    <Separator />
+                    <div className="space-y-3">
+                      <Label className="text-sm font-medium flex items-center gap-2">
+                        <ArrowRight className="w-4 h-4 text-violet-500" />
+                        色域调整
+                      </Label>
+                      <p className="text-xs text-muted-foreground">
+                        将选中 LUT「{lutLibrary.get(manageInfoLutId)?.name}」的输出色域重新映射到目标色域，生成一个新的 LUT。
+                      </p>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1.5">
+                          <Label className="text-xs">新目标色域</Label>
+                          <Select value={gamutAdjNewGamut} onValueChange={setGamutAdjNewGamut}>
+                            <SelectTrigger className="w-full h-9">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {gamutNames.map((g) => (
+                                <SelectItem key={g} value={g}>
+                                  {g}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className="text-xs">新传输函数</Label>
+                          <Select value={gamutAdjNewTF} onValueChange={(v) => setGamutAdjNewTF(v as TransferFunctionName)}>
+                            <SelectTrigger className="w-full h-9">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {tfNames.map((tf) => (
+                                <SelectItem key={tf} value={tf}>
+                                  {tf}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+                      <Button
+                        onClick={() => {
+                          if (isGamutAdjusting) return;
+                          setIsGamutAdjusting(true);
+                          const srcId = manageInfoLutId;
+                          const entry = lutLibrary.get(srcId);
+                          if (!entry) { setIsGamutAdjusting(false); return; }
+                          const lut = libraryToLUT3D(entry);
+                          requestAnimationFrame(() => {
+                            setTimeout(() => {
+                              try {
+                                const adjusted = adjustLUTGamut(lut, gamutAdjNewGamut, gamutAdjNewTF);
+                                const id = generateId();
+                                addLUT(id, {
+                                  name: adjusted.name,
+                                  size: adjusted.size,
+                                  data: adjusted.data,
+                                  srcGamut: adjusted.srcGamut,
+                                  dstGamut: adjusted.dstGamut,
+                                });
+                                setManageInfoLutId(id);
+                                setApplySelectedLutId(id);
+                                setExportSelectedLutId(id);
+                                setGamutAdjResult(`色域调整成功: ${lut.dstGamut || 'sRGB'} → ${gamutAdjNewGamut}`);
+                                setTimeout(() => setGamutAdjResult(''), 4000);
+                              } catch (err) {
+                                setGamutAdjResult(`调整失败: ${err instanceof Error ? err.message : '未知错误'}`);
+                                setTimeout(() => setGamutAdjResult(''), 5000);
+                              } finally {
+                                setIsGamutAdjusting(false);
+                              }
+                            }, 100);
+                          });
+                        }}
+                        disabled={isGamutAdjusting}
+                        className="w-full gap-2 bg-gradient-to-r from-violet-500 to-purple-600 hover:from-violet-600 hover:to-purple-700 text-white shadow-md transition-all duration-300"
+                      >
+                        {isGamutAdjusting ? (
+                          <>
+                            <span className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                            调整中...
+                          </>
+                        ) : (
+                          <>
+                            <ArrowRight className="w-4 h-4" />
+                            调整色域
+                          </>
+                        )}
+                      </Button>
+                      {gamutAdjResult && (
+                        <div className={`flex items-center gap-2 p-2.5 rounded-lg text-xs animate-in fade-in duration-300 ${
+                          gamutAdjResult.startsWith('色域调整成功')
+                            ? 'bg-green-50 border border-green-200 text-green-700'
+                            : 'bg-destructive/10 border border-destructive/20 text-destructive'
+                        }`}>
+                          {gamutAdjResult.startsWith('色域调整成功')
+                            ? <Check className="w-4 h-4 flex-shrink-0" />
+                            : <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                          }
+                          {gamutAdjResult}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Right sidebar: Chain LUT (top) + LUT Details (bottom) */}
+            <div className="flex flex-col gap-6">
+              {/* Top: 链接 LUT */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Link2 className="w-4 h-4" />
+                    链接 LUT
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {lutEntries.length < 2 && (
+                    <div className="text-center text-muted-foreground py-4">
+                      <p className="text-sm">需要至少 2 个 LUT 才能链接。</p>
+                    </div>
+                  )}
+                  {lutEntries.length >= 2 && (
+                    <div className="space-y-3">
+                      <p className="text-xs text-muted-foreground">
+                        先应用 LUT1，再应用 LUT2，创建组合 LUT。
+                      </p>
+                      <div className="space-y-2">
+                        {renderLutSelector('LUT 1', chainLut1Id, setChainLut1Id)}
+                        {renderLutSelector('LUT 2', chainLut2Id, setChainLut2Id)}
+                      </div>
+                      <Button
+                        onClick={handleChain}
+                        disabled={!chainLut1Id || !chainLut2Id || chainLut1Id === chainLut2Id}
+                        variant="secondary"
+                        className="w-full"
+                      >
+                        <Link2 className="w-4 h-4 mr-2" />
+                        链接 LUT
+                      </Button>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Bottom: LUT 详情 */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Info className="w-4 h-4" />
+                    LUT 详情
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {!manageInfoLutId && (
+                    <div className="text-center text-muted-foreground py-8">
+                      <p className="text-sm">点击左侧 LUT 查看详情。</p>
+                    </div>
+                  )}
+
+                  {manageInfoLutId && lutLibrary.get(manageInfoLutId) && (
+                    (() => {
+                      const entry = lutLibrary.get(manageInfoLutId)!;
+                      return (
+                        <div className="space-y-3">
+                          <div className="rounded-lg border p-3 space-y-2.5">
+                            <div>
+                              <span className="text-xs text-muted-foreground block">名称</span>
+                              <span className="text-sm font-medium">{entry.name}</span>
+                            </div>
+                            <div>
+                              <span className="text-xs text-muted-foreground block">网格大小</span>
+                              <span className="text-sm">{entry.size} &times; {entry.size} &times; {entry.size}</span>
+                            </div>
+                            <div>
+                              <span className="text-xs text-muted-foreground block">总条目数</span>
+                              <span className="text-sm">{(entry.size ** 3).toLocaleString()}</span>
+                            </div>
+                            <div>
+                              <span className="text-xs text-muted-foreground block">内存</span>
+                              <span className="text-sm">{(entry.data.byteLength / 1024).toFixed(1)} KB</span>
+                            </div>
+                            {entry.srcGamut && (
+                              <div>
+                                <span className="text-xs text-muted-foreground block">源色域</span>
+                                <Badge variant="outline" className="text-xs">{entry.srcGamut}</Badge>
+                              </div>
+                            )}
+                            {entry.dstGamut && (
+                              <div>
+                                <span className="text-xs text-muted-foreground block">目标色域</span>
+                                <Badge variant="outline" className="text-xs">{entry.dstGamut}</Badge>
+                              </div>
+                            )}
+                          </div>
+
+                          <Separator />
+
+                          {/* Color sample: identity vs applied */}
+                          <div className="space-y-2">
+                            <Label className="text-xs text-muted-foreground">颜色采样</Label>
+                            <div className="grid grid-cols-4 gap-1.5">
+                              {[
+                                [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1],
+                                [0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5], [0.5, 0.5, 0.5],
+                              ].map(([r, g, b], i) => {
+                                const lut = libraryToLUT3D(entry);
+                                const [or, og, ob] = applyLUT3D(lut, r, g, b);
+                                return (
+                                  <div key={i} className="flex flex-col items-center gap-0.5">
+                                    <div
+                                      className="w-8 h-8 rounded border"
+                                      style={{
+                                        backgroundColor: rgbToHex(
+                                          clamp(or, 0, 1),
+                                          clamp(og, 0, 1),
+                                          clamp(ob, 0, 1)
+                                        ),
+                                      }}
+                                      title={`输入: (${r}, ${g}, ${b}) → 输出: (${or.toFixed(3)}, ${og.toFixed(3)}, ${ob.toFixed(3)})`}
+                                    />
+                                    <span className="text-[9px] text-muted-foreground">
+                                      {r},{g},{b}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+          </div>
+        </TabsContent>
+
+        {/* ============================== */}
+        {/* TAB 4: Import LUT              */}
+        {/* ============================== */}
+        <TabsContent value="import">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">导入 3D LUT</CardTitle>
+                <CardDescription>
+                  支持 .cube 和 .csv 两种格式。CSV 格式为逗号分隔的 RGB 整数值，需指定位深和排列顺序。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {/* Format selector */}
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium">文件格式</Label>
+                  <div className="flex gap-2">
+                    <Button
+                      variant={importFormat === 'cube' ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => {
+                        setImportFormat('cube');
+                        setParsedLUT(null);
+                        setParseError('');
+                      }}
+                      className="gap-1.5"
+                    >
+                      .cube 格式
+                    </Button>
+                    <Button
+                      variant={importFormat === 'csv' ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => {
+                        setImportFormat('csv');
+                        setParsedLUT(null);
+                        setParseError('');
+                      }}
+                      className="gap-1.5"
+                    >
+                      .csv 格式
+                    </Button>
+                  </div>
+                </div>
+
+                {/* CSV-specific options */}
+                {importFormat === 'csv' && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 space-y-3">
+                    <div className="flex items-center gap-2 text-sm font-medium text-amber-800">
+                      <AlertCircle className="w-4 h-4" />
+                      CSV 导入选项
+                    </div>
+
+                    {/* Bit depth */}
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">位深</Label>
+                      <Select value={String(csvBitDepth)} onValueChange={(v) => setCsvBitDepth(Number(v))}>
+                        <SelectTrigger className="w-full h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="8">8-bit (0 – 255)</SelectItem>
+                          <SelectItem value="10">10-bit (0 – 1023)</SelectItem>
+                          <SelectItem value="12">12-bit (0 – 4095)</SelectItem>
+                          <SelectItem value="14">14-bit (0 – 16383)</SelectItem>
+                          <SelectItem value="16">16-bit (0 – 65535)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-[11px] text-muted-foreground">
+                        CSV 中的整数值将除以 {(Math.pow(2, csvBitDepth) - 1)} 归一化到 0 – 1
+                      </p>
+                    </div>
+
+                    {/* Data order */}
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">数据排列顺序</Label>
+                      <Select value={csvOrder} onValueChange={(v) => setCsvOrder(v as 'rgb' | 'bgr')}>
+                        <SelectTrigger className="w-full h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="rgb">RGB 递增 (R 外层 → G 中层 → B 内层)</SelectItem>
+                          <SelectItem value="bgr">BGR 递增 (B 外层 → G 中层 → R 内层)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-[11px] text-muted-foreground">
+                        {csvOrder === 'rgb'
+                          ? 'RGB 递增: R 值变化最慢（外层循环），B 值变化最快（内层循环）'
+                          : 'BGR 递增: B 值变化最慢（外层循环），R 值变化最快（内层循环）'}
+                      </p>
+                    </div>
+
+                    {/* CSV line count info */}
+                    {csvLineCount !== null && (
+                      <div className="text-xs bg-white/60 rounded-md p-2 border border-amber-100">
+                        <span className="text-muted-foreground">已加载数据行数: </span>
+                        <span className="font-medium">{csvLineCount.toLocaleString()}</span>
+                        <span className="text-muted-foreground"> | 自动检测网格: </span>
+                        <span className="font-medium">{Math.round(Math.cbrt(csvLineCount))}³</span>
+                        {Math.pow(Math.round(Math.cbrt(csvLineCount)), 3) === csvLineCount ? (
+                          <span className="text-green-600 ml-1">✓ 有效</span>
+                        ) : (
+                          <span className="text-red-500 ml-1">✗ 不是完全立方数</span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Cube-specific options */}
+                {importFormat === 'cube' && (
+                  <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 space-y-3">
+                    <div className="flex items-center gap-2 text-sm font-medium text-blue-800">
+                      <AlertCircle className="w-4 h-4" />
+                      .cube 导入选项
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">数据遍历顺序</Label>
+                      <Select value={cubeOrder} onValueChange={(v) => setCubeOrder(v as 'bgr' | 'rgb')}>
+                        <SelectTrigger className="w-full h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="bgr">BGR 递增 (B 外层 → G 中层 → R 内层) — 标准 .cube</SelectItem>
+                          <SelectItem value="rgb">RGB 递增 (R 外层 → G 中层 → B 内层)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-[11px] text-muted-foreground">
+                        {cubeOrder === 'bgr'
+                          ? '标准 .cube 格式，B 值变化最慢（外层），R 值变化最快（内层）'
+                          : 'RGB 格式，R 值变化最慢（外层），B 值变化最快（内层），导入时自动重排'}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                <Separator />
+
+                {/* File upload button */}
+                <div className="flex items-center gap-3">
+                  <input
+                    ref={importFileRef}
+                    type="file"
+                    accept={importFormat === 'csv' ? '.csv' : '.cube'}
+                    className="hidden"
+                    onChange={handleImportFile}
+                  />
+                  <Button
+                    variant="outline"
+                    onClick={() => importFileRef.current?.click()}
+                    className="gap-2"
+                  >
+                    <Upload className="w-4 h-4" />
+                    上传 {importFormat === 'csv' ? '.csv' : '.cube'} 文件
+                  </Button>
+                  <span className="text-xs text-muted-foreground">
+                    或在下方粘贴内容
+                  </span>
+                </div>
+
+                <Textarea
+                  value={cubeText}
+                  onChange={(e) => {
+                    setCubeText(e.target.value);
+                    setParsedLUT(null);
+                    setParseError('');
+                    // Count CSV lines when typing
+                    if (importFormat === 'csv' && e.target.value) {
+                      const lines = e.target.value.split('\n').filter(l => l.trim().length > 0);
+                      setCsvLineCount(lines.length);
+                    } else {
+                      setCsvLineCount(null);
+                    }
+                  }}
+                  placeholder={
+                    importFormat === 'cube'
+                      ? `TITLE "My LUT"\nDOMAIN_MIN 0.0 0.0 0.0\nDOMAIN_MAX 1.0 1.0 1.0\nLUT_3D_SIZE 33\n\n0.000000 0.000000 0.000000\n...`
+                      : `0,0,0\n86,77,0\n310,191,131\n...\n(每行 3 个逗号分隔的整数值)`
+                  }
+                  className="font-mono text-xs min-h-[200px] max-h-96"
+                />
+
+                <Button
+                  onClick={handleParse}
+                  disabled={!cubeText.trim()}
+                  className="w-full"
+                >
+                  <FileUp className="w-4 h-4 mr-2" />
+                  解析 {importFormat === 'csv' ? 'CSV' : '.cube'} 内容
+                </Button>
+
+                {parseError && (
+                  <div className="flex items-center gap-2 p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                    {parseError}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Parsed LUT info */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">已解析 LUT 信息</CardTitle>
+                <CardDescription>
+                  {importFormat === 'csv'
+                    ? `CSV 格式 | ${csvOrder.toUpperCase()} 递增 | ${csvBitDepth}-bit`
+                    : '.cube 格式'}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {!parsedLUT && !parseError && (
+                  <div className="flex flex-col items-center justify-center py-12 text-center text-muted-foreground">
+                    <FileUp className="w-10 h-10 mb-3 opacity-30" />
+                    <p className="text-sm">尚未解析 LUT。</p>
+                  </div>
+                )}
+
+                {parsedLUT && (
+                  <div className="space-y-4">
+                    <div className="rounded-lg border p-4 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <Check className="w-4 h-4 text-green-500" />
+                        <span className="text-sm font-medium">解析成功</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        <div>
+                          <span className="text-xs text-muted-foreground block">名称</span>
+                          <span className="font-medium">{parsedLUT.name}</span>
+                        </div>
+                        <div>
+                          <span className="text-xs text-muted-foreground block">大小</span>
+                          <span className="font-medium">{parsedLUT.size} &times; {parsedLUT.size} &times; {parsedLUT.size}</span>
+                        </div>
+                        <div>
+                          <span className="text-xs text-muted-foreground block">域最小值</span>
+                          <span className="font-medium">
+                            {parsedLUT.inputRange.min} {parsedLUT.inputRange.min} {parsedLUT.inputRange.min}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-xs text-muted-foreground block">域最大值</span>
+                          <span className="font-medium">
+                            {parsedLUT.inputRange.max} {parsedLUT.inputRange.max} {parsedLUT.inputRange.max}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-xs text-muted-foreground block">总条目数</span>
+                          <span className="font-medium">
+                            {(parsedLUT.size ** 3).toLocaleString()}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-xs text-muted-foreground block">内存</span>
+                          <span className="font-medium">
+                            {(parsedLUT.data.byteLength / 1024).toFixed(1)} KB
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Reorder verification — show sample lookups vs raw CSV values */}
+                    {importFormat === 'csv' && (
+                      <div className="space-y-2">
+                        <Label className="text-xs text-muted-foreground flex items-center gap-1.5">
+                          <Check className="w-3 h-3 text-green-500" />
+                          重排验证（输入网格点 → applyLUT3D 查找结果）
+                        </Label>
+                        <div className="rounded-md border bg-muted/20 p-3 max-h-48 overflow-y-auto">
+                          <table className="text-[11px] font-mono w-full">
+                            <thead>
+                              <tr className="text-muted-foreground">
+                                <th className="text-left pr-3 font-normal">输入 (R,G,B)</th>
+                                <th className="text-left pr-3 font-normal">归一化</th>
+                                <th className="text-left font-normal">applyLUT3D 输出</th>
+                              </tr>
+                            </thead>
+                            <tbody className="text-muted-foreground">
+                              {(() => {
+                                const size = parsedLUT.size;
+                                // Sample specific grid points: corners, midpoints, and some from CSV
+                                const samples: [number, number, number][] = [
+                                  [0, 0, 0],
+                                  [size - 1, 0, 0],
+                                  [0, size - 1, 0],
+                                  [0, 0, size - 1],
+                                  [size - 1, size - 1, size - 1],
+                                  [Math.floor(size / 2), Math.floor(size / 2), Math.floor(size / 2)],
+                                ];
+                                return samples.map(([ri, gi, bi]) => {
+                                  const normR = ri / (size - 1);
+                                  const normG = gi / (size - 1);
+                                  const normB = bi / (size - 1);
+                                  const [or, og, ob] = applyLUT3D(parsedLUT, normR, normG, normB);
+                                  return (
+                                    <tr key={`${ri}-${gi}-${bi}`} className="border-t border-muted/30">
+                                      <td className="py-1 pr-3">({ri},{gi},{bi})</td>
+                                      <td className="py-1 pr-3">({normR.toFixed(4)},{normG.toFixed(4)},{normB.toFixed(4)})</td>
+                                      <td className="py-1">({or.toFixed(4)},{og.toFixed(4)},{ob.toFixed(4)})</td>
+                                    </tr>
+                                  );
+                                });
+                              })()}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Data preview (internal format, first entries) */}
+                    <div className="space-y-2">
+                      <Label className="text-xs text-muted-foreground">内部数据预览（前10条，B-outer 排列）</Label>
+                      <div className="rounded-md border bg-muted/20 p-3 max-h-32 overflow-y-auto">
+                        <pre className="text-[11px] font-mono text-muted-foreground leading-relaxed">
+                          {Array.from({ length: Math.min(10, parsedLUT.size ** 3) })
+                            .map((_, i) => {
+                              const idx = i * 3;
+                              const size = parsedLUT.size;
+                              // Decode back to grid point
+                              const b = Math.floor(i / (size * size));
+                              const g = Math.floor((i % (size * size)) / size);
+                              const r = i % size;
+                              return `[${r},${g},${b}] → ${parsedLUT.data[idx]?.toFixed(6) ?? '-'} ${parsedLUT.data[idx + 1]?.toFixed(6) ?? '-'} ${parsedLUT.data[idx + 2]?.toFixed(6) ?? '-'}`;
+                            })
+                            .join('\n')}
+                        </pre>
+                      </div>
+                    </div>
+
+                    <Button onClick={handleAddImportedLUT} className="w-full" disabled={importAddedSuccess}>
+                      {importAddedSuccess ? (
+                        <>
+                          <Check className="w-4 h-4 mr-2" />
+                          已成功添加到库中
+                        </>
+                      ) : (
+                        <>
+                          <Layers className="w-4 h-4 mr-2" />
+                          添加到库中
+                        </>
+                      )}
+                    </Button>
+                    {importAddedSuccess && (
+                      <div className="flex items-center gap-2 p-2.5 rounded-lg bg-green-50 border border-green-200 text-green-700 text-xs animate-in fade-in duration-300">
+                        <Check className="w-4 h-4 flex-shrink-0" />
+                        LUT 已成功入库，可前往"应用"或"导出"选项卡使用。
+                      </div>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        {/* ============================== */}
+        {/* TAB 5: Export LUT              */}
+        {/* ============================== */}
+        <TabsContent value="export">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">导出 3DLUT</CardTitle>
+                <CardDescription>
+                  从库中选择一个 LUT 以 .cube 或 .csv 格式导出。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {renderLutSelector('要导出的 LUT', exportSelectedLutId, setExportSelectedLutId)}
+
+                {exportSelectedLutId && lutLibrary.get(exportSelectedLutId) && (
+                  (() => {
+                    const entry = lutLibrary.get(exportSelectedLutId)!;
+                    return (
+                      <div className="rounded-lg border p-4 space-y-2">
+                        <div className="grid grid-cols-2 gap-3 text-sm">
+                          <div>
+                            <span className="text-xs text-muted-foreground block">名称</span>
+                            <span className="font-medium">{entry.name}</span>
+                          </div>
+                          <div>
+                            <span className="text-xs text-muted-foreground block">大小</span>
+                            <span className="font-medium">{entry.size}&sup3; ({(entry.size ** 3).toLocaleString()} 条目)</span>
+                          </div>
+                          <div>
+                            <span className="text-xs text-muted-foreground block">源</span>
+                            <Badge variant="secondary" className="text-xs">
+                              {entry.srcGamut || 'N/A'}
+                            </Badge>
+                          </div>
+                          <div>
+                            <span className="text-xs text-muted-foreground block">目标</span>
+                            <Badge variant="secondary" className="text-xs">
+                              {entry.dstGamut || 'N/A'}
+                            </Badge>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()
+                )}
+
+                <Separator />
+
+                {/* Export format selection */}
+                <div className="space-y-3">
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">导出格式</Label>
+                    <Select value={exportFormat} onValueChange={(v) => setExportFormat(v as 'cube' | 'csv')}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="cube">.cube (标准 3DLUT 格式)</SelectItem>
+                        <SelectItem value="csv">.csv (逗号分隔值)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* Channel order selection */}
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">通道顺序</Label>
+                    <Select value={exportChannelOrder} onValueChange={(v) => setExportChannelOrder(v as 'bgr' | 'rgb')}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="bgr">BGR (B 外层, G 中层, R 内层 — 标准 .cube 顺序)</SelectItem>
+                        <SelectItem value="rgb">RGB (R 外层, G 中层, B 内层)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      {exportChannelOrder === 'bgr'
+                        ? '数据按 B→G→R 顺序排列，最外层循环为 B，最内层为 R'
+                        : '数据按 R→G→B 顺序排列，最外层循环为 R，最内层为 B'}
+                    </p>
+                  </div>
+
+                  {/* CSV bit depth option (only shown for CSV format) */}
+                  {exportFormat === 'csv' && (
+                    <div className="space-y-2">
+                      <Label className="text-sm font-medium">CSV 数值精度</Label>
+                      <Select value={String(exportCsvBitDepth)} onValueChange={(v) => setExportCsvBitDepth(Number(v))}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="0">浮点 (0.000000 - 1.000000)</SelectItem>
+                          <SelectItem value="8">8-bit 整数 (0 - 255)</SelectItem>
+                          <SelectItem value="10">10-bit 整数 (0 - 1023)</SelectItem>
+                          <SelectItem value="12">12-bit 整数 (0 - 4095)</SelectItem>
+                          <SelectItem value="16">16-bit 整数 (0 - 65535)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        {exportCsvBitDepth === 0
+                          ? '输出归一化浮点值，每行 3 个逗号分隔数值'
+                          : `输出 ${exportCsvBitDepth}-bit 整数值 (0 - ${Math.pow(2, exportCsvBitDepth) - 1})`}
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex gap-3">
+                  <Button
+                    onClick={handleDownload}
+                    disabled={!exportSelectedLutId}
+                    className="flex-1 gap-2"
+                  >
+                    <Download className="w-4 h-4" />
+                    下载 .{exportFormat}
+                  </Button>
+                  <Button
+                    onClick={handleCopy}
+                    disabled={!exportSelectedLutId}
+                    variant="secondary"
+                    className="flex-1 gap-2"
+                  >
+                    {copySuccess ? (
+                      <Check className="w-4 h-4" />
+                    ) : (
+                      <Copy className="w-4 h-4" />
+                    )}
+                    {copySuccess ? '已复制！' : '复制到剪贴板'}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Preview */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  {exportFormat === 'cube' ? '.cube' : '.csv'} 文件预览
+                </CardTitle>
+                <CardDescription>
+                  导出文件前 50 行。
+                  {exportFormat === 'cube' && exportChannelOrder === 'rgb' && ' (RGB 顺序)'}
+                  {exportFormat === 'cube' && exportChannelOrder === 'bgr' && ' (BGR 标准顺序)'}
+                  {exportFormat === 'csv' && exportChannelOrder === 'rgb' && ' (RGB 顺序)'}
+                  {exportFormat === 'csv' && exportChannelOrder === 'bgr' && ' (BGR 顺序)'}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {!cubePreview && (
+                  <div className="flex flex-col items-center justify-center py-12 text-center text-muted-foreground">
+                    <FileDown className="w-10 h-10 mb-3 opacity-30" />
+                    <p className="text-sm">选择一个 LUT 以预览导出内容。</p>
+                  </div>
+                )}
+
+                {cubePreview && (
+                  <div className="rounded-md border bg-muted/20 p-3 max-h-96 overflow-y-auto">
+                    <pre className="text-[11px] font-mono text-muted-foreground leading-relaxed whitespace-pre-wrap break-all">
+                      {cubePreview}
+                    </pre>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        {/* ============================== */}
+        {/* TAB: Chromaticity Upsampling    */}
+        {/* ============================== */}
+        <TabsContent value="upsampling">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Left: Import & Parse */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Expand className="w-4 h-4 text-primary" />
+                  色度上采样 (xyLv)
+                </CardTitle>
+                <CardDescription>
+                  导入 5×5×5 RGB-xyLv 数据，上采样到 17³，转换为 RGB 3DLUT。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4 max-h-[700px] overflow-y-auto">
+                {/* Import section */}
+                <div className="space-y-3">
+                  <Label className="text-sm font-medium">导入 xyLv 数据</Label>
+                  <p className="text-xs text-muted-foreground">
+                    每行 6 个数值：R, G, B, x, y, Lv（逗号或空格分隔），共 125 行 (5³)
+                  </p>
+                  <Textarea
+                    value={xyLvImportText}
+                    onChange={(e) => {
+                      setXyLvImportText(e.target.value);
+                      setXyLvParseError('');
+                    }}
+                    placeholder="0,0,0,0.3127,0.329,0.0&#10;0.25,0,0,0.45,0.35,0.1&#10;..."
+                    className="min-h-[120px] max-h-[200px] font-mono text-xs"
+                  />
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={handleXyLvParse}
+                      disabled={!xyLvImportText.trim()}
+                      size="sm"
+                      className="gap-1.5"
+                    >
+                      <FileUp className="w-3.5 h-3.5" />
+                      解析
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={() => {
+                        if (xyLvFileRef.current) xyLvFileRef.current.click();
+                      }}
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      上传文件
+                    </Button>
+                    <input
+                      ref={xyLvFileRef}
+                      type="file"
+                      accept=".csv,.txt"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        const reader = new FileReader();
+                        reader.onload = (ev) => {
+                          const text = ev.target?.result as string;
+                          setXyLvImportText(text);
+                          setXyLvParseError('');
+                          setXyLvData5(null);
+                          setXyLvUpData17(null);
+                        };
+                        reader.readAsText(file);
+                        e.target.value = '';
+                      }}
+                    />
+                  </div>
+                  {xyLvParseError && (
+                    <div className="flex items-center gap-2 p-2.5 rounded-lg text-xs bg-destructive/10 border border-destructive/20 text-destructive">
+                      <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                      {xyLvParseError}
+                    </div>
+                  )}
+                </div>
+
+                <Separator />
+
+                {/* Preview section - fixed height with scroll */}
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium">数据预览</Label>
+                  <div className="max-h-48 overflow-y-auto rounded-md border">
+                    {xyLvData5 ? (
+                      <div className="p-3 space-y-1.5 text-xs bg-muted/20">
+                        <div className="flex items-center gap-2">
+                          <Check className="w-4 h-4 text-green-500" />
+                          <span className="font-medium text-green-700">5³ xyLv 数据已导入</span>
+                        </div>
+                        <div className="text-muted-foreground">
+                          <span>125 行 × 6 列 (R,G,B,x,y,Lv)</span>
+                        </div>
+                        {(() => {
+                          let minX = Infinity, maxX = -Infinity;
+                          let minY = Infinity, maxY = -Infinity;
+                          let minLv = Infinity, maxLv = -Infinity;
+                          for (let i = 0; i < 125; i++) {
+                            const xv = xyLvData5[i * 6 + 3];
+                            const yv = xyLvData5[i * 6 + 4];
+                            const lv = xyLvData5[i * 6 + 5];
+                            if (xv < minX) minX = xv; if (xv > maxX) maxX = xv;
+                            if (yv < minY) minY = yv; if (yv > maxY) maxY = yv;
+                            if (lv < minLv) minLv = lv; if (lv > maxLv) maxLv = lv;
+                          }
+                          return (
+                            <>
+                              <div className="text-muted-foreground">
+                                <span>x 范围: [{minX.toFixed(4)}, {maxX.toFixed(4)}]</span>
+                              </div>
+                              <div className="text-muted-foreground">
+                                <span>y 范围: [{minY.toFixed(4)}, {maxY.toFixed(4)}]</span>
+                              </div>
+                              <div className="text-muted-foreground">
+                                <span>Lv 范围: [{minLv.toFixed(4)}, {maxLv.toFixed(4)}]</span>
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    ) : (
+                      <div className="p-3 text-xs text-muted-foreground">尚未导入数据</div>
+                    )}
+                    {xyLvUpData17 && (
+                      <div className="p-3 space-y-1 text-xs bg-green-50 border-t border-green-200">
+                        <div className="flex items-center gap-2 text-green-700">
+                          <Check className="w-4 h-4" />
+                          <span className="font-medium">17³ 上采样数据已就绪</span>
+                        </div>
+                        <span className="text-muted-foreground">4,913 行 × 6 列</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <Separator />
+
+                {/* Upsample section */}
+                <div className="space-y-3">
+                  <Label className="text-sm font-medium">上采样</Label>
+                  <div className="flex items-center gap-3">
+                    <Button
+                      onClick={handleXyLvUpsample}
+                      disabled={!xyLvData5 || isXyLvUpsampling}
+                      size="sm"
+                      className="gap-2"
+                    >
+                      {isXyLvUpsampling ? (
+                        <>
+                          <span className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                          上采样中...
+                        </>
+                      ) : (
+                        <>
+                          <Expand className="w-4 h-4" />
+                          5³ → 17³ 上采样
+                        </>
+                      )}
+                    </Button>
+                    <span className="text-xs text-muted-foreground">三线性插值</span>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Right: Convert & Export */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">转换与导出</CardTitle>
+                <CardDescription>
+                  将 xyLv 数据转换为 RGB 3DLUT，或导出 xyLv CSV 文件。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-5">
+                {/* Convert section */}
+                <div className="space-y-3">
+                  <Label className="text-sm font-medium">xyLv → RGB 转换</Label>
+                  <p className="text-xs text-muted-foreground">
+                    选择目标色域和传输函数，将 xyLv 数据转换为 RGB 3DLUT。
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">色域</Label>
+                      <Select value={xyLvGamut} onValueChange={setXyLvGamut}>
+                        <SelectTrigger className="w-full h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {gamutNames.map((g) => (
+                            <SelectItem key={g} value={g}>
+                              {g}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">传输函数</Label>
+                      <Select value={xyLvTF} onValueChange={(v) => setXyLvTF(v as TransferFunctionName)}>
+                        <SelectTrigger className="w-full h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {tfNames.map((tf) => (
+                            <SelectItem key={tf} value={tf}>
+                              {tf}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <Button
+                    onClick={handleXyLvToRGB}
+                    disabled={!xyLvUpData17}
+                    className="w-full gap-2"
+                  >
+                    {xyLvConvertSuccess ? (
+                      <>
+                        <Check className="w-4 h-4" />
+                        已添加到 LUT 库
+                      </>
+                    ) : (
+                      <>
+                        <Wand2 className="w-4 h-4" />
+                        转换并添加到 LUT 库
+                      </>
+                    )}
+                  </Button>
+                  {xyLvConvertSuccess && (
+                    <div className="flex items-center gap-2 p-2.5 rounded-lg text-xs bg-green-50 border border-green-200 text-green-700">
+                      <Check className="w-4 h-4 flex-shrink-0" />
+                      3DLUT 已成功添加到库中，可在「LUT 应用」和「LUT 导出」中使用
+                    </div>
+                  )}
+                  {xyLvConvertError && (
+                    <div className="flex items-center gap-2 p-2.5 rounded-lg text-xs bg-destructive/10 border border-destructive/20 text-destructive">
+                      <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                      {xyLvConvertError}
+                    </div>
+                  )}
+                  <p className="text-[10px] text-muted-foreground">
+                    将使用 17³ 上采样数据进行转换
+                  </p>
+                </div>
+
+                <Separator />
+
+                {/* Export section */}
+                <div className="space-y-3">
+                  <Label className="text-sm font-medium">导出 xyLv 数据</Label>
+                  <Button
+                    onClick={handleXyLvExport}
+                    disabled={!xyLvData5 && !xyLvUpData17}
+                    variant="secondary"
+                    className="w-full gap-2"
+                  >
+                    <Download className="w-4 h-4" />
+                    导出 xyLv CSV
+                  </Button>
+                  <p className="text-[10px] text-muted-foreground">
+                    导出格式：R,G,B,x,y,Lv（每行 6 个逗号分隔数值）
+                  </p>
+                </div>
+
+                <Separator />
+
+                {/* Info section */}
+                <div className="rounded-md border p-3 bg-muted/20 text-xs space-y-1.5">
+                  <div className="flex items-center gap-1.5 font-medium">
+                    <Info className="w-3.5 h-3.5 text-primary" />
+                    说明
+                  </div>
+                  <p className="text-muted-foreground">
+                    色度上采样用于将稀疏的 5³ xyLv 色度数据通过三线性插值扩展为 17³ 密集数据，
+                    再通过 xyY→RGB 转换生成可用的 3DLUT 查找表。
+                  </p>
+                  <p className="text-muted-foreground">
+                    输入数据格式：R,G,B 为输入网格坐标 (0-1)，x,y 为 CIE 色度坐标，Lv 为亮度 (0-1)。
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+      </Tabs>
+
+      {/* Image Viewer Dialog */}
+      <Dialog open={!!imageViewSrc} onOpenChange={(open) => { if (!open) setImageViewSrc(null); }}>
+        <DialogContent className="sm:max-w-4xl max-h-[90vh] p-2">
+          <DialogHeader className="px-4 pt-2">
+            <div className="flex items-center justify-between">
+              <DialogTitle className="text-sm">{imageViewTitle}</DialogTitle>
+              {imageViewSrc && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1.5 text-xs"
+                  onClick={() => handleExportImage(imageViewSrc, `${imageViewTitle}.png`)}
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  导出图片
+                </Button>
+              )}
+            </div>
+          </DialogHeader>
+          <div className="overflow-auto flex items-center justify-center p-2" style={{ maxHeight: 'calc(90vh - 80px)' }}>
+            {imageViewSrc && (
+              <img
+                src={imageViewSrc}
+                alt={imageViewTitle}
+                className="max-w-full h-auto rounded-md"
+                style={{ imageRendering: 'auto' }}
+              />
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Generate LUT: Name Dialog */}
+      <Dialog open={showGenerateNameDialog} onOpenChange={setShowGenerateNameDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>生成 LUT</DialogTitle>
+            <DialogDescription>
+              为即将生成的 LUT 命名。你可以修改名称或使用建议的默认值。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Label className="text-xs text-muted-foreground">LUT 名称</Label>
+            <Input
+              value={generateLutName}
+              onChange={(e) => setGenerateLutName(e.target.value)}
+              placeholder="输入 LUT 名称"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  handleGenerateConfirm();
+                }
+              }}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              配置：{srcGamut} → {dstGamut} | {gridSize}³ | {srcTF} / {dstTF}
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowGenerateNameDialog(false)}>
+              取消
+            </Button>
+            <Button onClick={handleGenerateConfirm} disabled={!generateLutName.trim()}>
+              确认生成
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete LUT: Confirmation Dialog */}
+      <AlertDialog open={deleteConfirmId !== null} onOpenChange={(open) => { if (!open) { setDeleteConfirmId(null); setDeleteConfirmName(''); } }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认删除</AlertDialogTitle>
+            <AlertDialogDescription>
+              确定要删除 LUT「{deleteConfirmName}」吗？此操作无法撤销。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => deleteConfirmId && handleDeleteConfirm(deleteConfirmId)}
+            >
+              删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
