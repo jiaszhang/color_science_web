@@ -772,7 +772,7 @@ function NodeConfigPanel({
                   </div>
                   <div className="space-y-1">
                     <div className="flex items-center justify-between">
-                      <Label className="text-[10px]">下采样因子</Label>
+                      <Label className="text-[10px]">下采样因子（1=不下采样）</Label>
                       <span className="text-[10px] font-mono text-muted-foreground">{downsampleFactor}</span>
                     </div>
                     <Slider value={[downsampleFactor]} onValueChange={([v]) => updateParam('downsampleFactor', v)} min={1} max={8} step={1} />
@@ -859,15 +859,14 @@ function NodeConfigPanel({
                           ctx.fillText(yVal.toFixed(1), padL - 4, gy);
                         }
 
-                        // x = y reference line (light dashed)
+                        // x = y reference line — full diagonal from bottom-left to top-right corner
                         ctx.save();
                         ctx.strokeStyle = '#d1d5db';
                         ctx.lineWidth = 1;
                         ctx.setLineDash([4, 3]);
                         ctx.beginPath();
-                        const refMin = Math.min(xMax, yMax);
-                        ctx.moveTo(toPixelX(0), toPixelY(0));
-                        ctx.lineTo(toPixelX(refMin), toPixelY(refMin));
+                        ctx.moveTo(padL, padT + plotH);
+                        ctx.lineTo(padL + plotW, padT);
                         ctx.stroke();
                         ctx.restore();
 
