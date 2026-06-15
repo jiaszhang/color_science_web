@@ -21,7 +21,12 @@ import {
   rwToneCurve,
   type TMOParams,
 } from '@/lib/color-science/reference-white-tmo';
-import { loadImageRaw, loadImageUrlRaw } from '@/lib/color-science/image-loader';
+import { loadImageRaw, loadImageUrlRaw, IMAGE_ACCEPT_STRING } from '@/lib/color-science/image-loader';
+import {
+  exportDataUrlAsFormat,
+  EXPORT_FORMAT_OPTIONS,
+  type ExportImageFormat,
+} from '@/lib/color-science/image-formats';
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -2264,7 +2269,8 @@ function BatchProcessTab() {
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      if (!file.type.startsWith('image/')) continue;
+      const isExrOrTiff = file.name.toLowerCase().endsWith('.exr') || file.name.toLowerCase().endsWith('.tiff') || file.name.toLowerCase().endsWith('.tif');
+      if (!file.type.startsWith('image/') && !isExrOrTiff) continue;
       const itemId = `img_${Date.now()}_${i}_${Math.random().toString(36).substr(2, 5)}`;
 
       // Add placeholder immediately
@@ -2401,13 +2407,24 @@ function BatchProcessTab() {
     setImageProcessing(false);
   }, [pipeline, imageList]);
 
-  const handleDownloadImage = useCallback((item: ImageItem) => {
+  const [imageExportFormat, setImageExportFormat] = useState<ExportImageFormat>('png');
+
+  const handleDownloadImage = useCallback(async (item: ImageItem) => {
     if (!item.dstUrl) return;
-    const a = document.createElement('a');
-    a.href = item.dstUrl;
-    a.download = `processed_${item.name.replace(/\.[^.]+$/, '')}.png`;
-    a.click();
-  }, []);
+    try {
+      await exportDataUrlAsFormat(
+        item.dstUrl,
+        `processed_${item.name.replace(/\.[^.]+$/, '')}`,
+        imageExportFormat
+      );
+    } catch {
+      // Fallback
+      const a = document.createElement('a');
+      a.href = item.dstUrl;
+      a.download = `processed_${item.name.replace(/\.[^.]+$/, '')}.png`;
+      a.click();
+    }
+  }, [imageExportFormat]);
 
   const handleRemoveImage = useCallback((id: string) => {
     setImageList((prev) => prev.filter((item) => item.id !== id));
@@ -2632,8 +2649,8 @@ function BatchProcessTab() {
             >
               <Upload className="h-8 w-8 mx-auto text-muted-foreground/40 mb-2" />
               <p className="text-sm font-medium">拖拽或点击上传图片（支持多选）</p>
-              <p className="text-xs text-muted-foreground mt-1">支持 PNG / JPEG / WebP / TIFF 等，可一次选择多张</p>
-              <input ref={imageInputRef} type="file" accept="image/*" multiple className="hidden" onChange={(e) => { handleImageUpload(e.target.files); e.target.value = ''; }} />
+              <p className="text-xs text-muted-foreground mt-1">支持 PNG / JPEG / WebP / TIFF / EXR 等，可一次选择多张</p>
+              <input ref={imageInputRef} type="file" accept={IMAGE_ACCEPT_STRING} multiple className="hidden" onChange={(e) => { handleImageUpload(e.target.files); e.target.value = ''; }} />
             </div>
 
             {/* Image list */}
@@ -2641,7 +2658,18 @@ function BatchProcessTab() {
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <p className="text-xs font-medium">图片列表 ({imageList.length} 张)</p>
-                  <div className="flex gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5">
+                      <Label className="text-[10px] text-muted-foreground">导出</Label>
+                      <Select value={imageExportFormat} onValueChange={(v) => setImageExportFormat(v as ExportImageFormat)}>
+                        <SelectTrigger className="h-7 w-20 text-[10px]"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {EXPORT_FORMAT_OPTIONS.map((opt) => (
+                            <SelectItem key={opt.value} value={opt.value} className="text-xs">{opt.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
                     <Button
                       className="text-xs h-7"
                       size="sm"

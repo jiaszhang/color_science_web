@@ -10,7 +10,12 @@ import {
   type LUT3D,
 } from '@/lib/color-science/lut3d';
 import { useAppStore } from '@/lib/store/app-store';
-import { loadImageRaw, loadImageUrlRaw } from '@/lib/color-science/image-loader';
+import { loadImageRaw, loadImageUrlRaw, IMAGE_ACCEPT_STRING } from '@/lib/color-science/image-loader';
+import {
+  exportDataUrlAsFormat,
+  EXPORT_FORMAT_OPTIONS,
+  type ExportImageFormat,
+} from '@/lib/color-science/image-formats';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -108,7 +113,7 @@ function ImageDropZone({
 
   const handleFile = useCallback(
     (file: File) => {
-      if (!file.type.startsWith('image/')) return;
+      if (!file.type.startsWith('image/') && !file.name.toLowerCase().endsWith('.exr') && !file.name.toLowerCase().endsWith('.tiff') && !file.name.toLowerCase().endsWith('.tif')) return;
       // Load without ICC conversion to preserve raw pixel values
       loadImageRaw(file, 512).then((result) => {
         onImageLoad(result.dataUrl, file.name);
@@ -144,7 +149,7 @@ function ImageDropZone({
         <input
           ref={fileRef}
           type="file"
-          accept="image/*"
+          accept={IMAGE_ACCEPT_STRING}
           className="hidden"
           onChange={(e) => {
             const file = e.target.files?.[0];
@@ -497,15 +502,26 @@ function CalibrationImageWorkflow() {
     }, 100);
   }, [calibGridSize]);
 
-  const handleDownloadCalibration = useCallback(() => {
+  const [calibExportFormat, setCalibExportFormat] = useState<ExportImageFormat>('png');
+
+  const handleDownloadCalibration = useCallback(async () => {
     if (!calibrationImageSrc) return;
-    const a = document.createElement('a');
-    a.href = calibrationImageSrc;
-    a.download = `calibration_${calibGridSize}cubed.png`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  }, [calibrationImageSrc, calibGridSize]);
+    try {
+      await exportDataUrlAsFormat(
+        calibrationImageSrc,
+        `calibration_${calibGridSize}cubed`,
+        calibExportFormat
+      );
+    } catch {
+      // Fallback
+      const a = document.createElement('a');
+      a.href = calibrationImageSrc;
+      a.download = `calibration_${calibGridSize}cubed.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+  }, [calibrationImageSrc, calibGridSize, calibExportFormat]);
 
   const handleProcessedImageLoad = useCallback((src: string, name: string) => {
     setProcessedImageSrc(src);
@@ -657,15 +673,25 @@ function CalibrationImageWorkflow() {
                   )}
                 </div>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleDownloadCalibration}
-                className="gap-1.5"
-              >
-                <Download className="w-4 h-4" />
-                下载校准图 PNG
-              </Button>
+              <div className="flex items-center gap-2">
+                <Select value={calibExportFormat} onValueChange={(v) => setCalibExportFormat(v as ExportImageFormat)}>
+                  <SelectTrigger className="h-8 w-28 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {EXPORT_FORMAT_OPTIONS.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value} className="text-xs">{opt.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleDownloadCalibration}
+                  className="gap-1.5"
+                >
+                  <Download className="w-4 h-4" />
+                  下载校准图
+                </Button>
+              </div>
             </div>
           </div>
         )}

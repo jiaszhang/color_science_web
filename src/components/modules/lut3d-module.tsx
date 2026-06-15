@@ -17,7 +17,13 @@ import {
 } from '@/lib/color-science/lut3d';
 import { getGamutNames, getTransferFunctionNames, type TransferFunctionName } from '@/lib/color-science';
 import { xyYToXYZ, xyzToRgb, linearToRgb } from '@/lib/color-science/transform';
-import { loadImageRaw } from '@/lib/color-science/image-loader';
+import { loadImageRaw, IMAGE_ACCEPT_STRING } from '@/lib/color-science/image-loader';
+import {
+  exportDataUrlAsFormat,
+  EXPORT_FORMAT_OPTIONS,
+  getFileExtension,
+  type ExportImageFormat,
+} from '@/lib/color-science/image-formats';
 import { useAppStore } from '@/lib/store/app-store';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -148,6 +154,7 @@ export default function Lut3dModule() {
   const [isDragging, setIsDragging] = useState(false);
   // Track original image properties for faithful export
   const [originalImageType, setOriginalImageType] = useState<string>('image/png');
+  const [applyExportFormat, setApplyExportFormat] = useState<ExportImageFormat>('png');
   const [originalImageHasAlpha, setOriginalImageHasAlpha] = useState<boolean>(true);
   const [originalFileName, setOriginalFileName] = useState<string>('');
   // Image viewer dialog
@@ -367,21 +374,28 @@ export default function Lut3dModule() {
       e.preventDefault();
       setIsDragging(false);
       const file = e.dataTransfer.files[0];
-      if (file && file.type.startsWith('image/')) {
+      if (file && (file.type.startsWith('image/') || file.name.toLowerCase().endsWith('.exr') || file.name.toLowerCase().endsWith('.tiff') || file.name.toLowerCase().endsWith('.tif'))) {
         handleApplyImageUpload(file);
       }
     },
     [handleApplyImageUpload]
   );
 
-  const handleExportImage = useCallback((dataUrl: string, filename: string) => {
-    const a = document.createElement('a');
-    a.href = dataUrl;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  }, []);
+  const handleExportImage = useCallback(async (dataUrl: string, filename: string) => {
+    try {
+      // If filename already has an extension, strip it
+      const baseName = filename.replace(/\.[^.]+$/, '');
+      await exportDataUrlAsFormat(dataUrl, baseName, applyExportFormat);
+    } catch {
+      // Fallback to simple download
+      const a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+  }, [applyExportFormat]);
 
   const handleOpenImageView = useCallback((src: string, title: string) => {
     setImageViewSrc(src);
@@ -1433,7 +1447,7 @@ export default function Lut3dModule() {
                     if (!applySelectedLutId) return;
                     const fileInput = document.createElement('input');
                     fileInput.type = 'file';
-                    fileInput.accept = 'image/*';
+                    fileInput.accept = IMAGE_ACCEPT_STRING;
                     fileInput.onchange = (e) => {
                       const file = (e.target as HTMLInputElement).files?.[0];
                       if (file) handleApplyImageUpload(file);
@@ -1446,7 +1460,7 @@ export default function Lut3dModule() {
                     拖放图片到此处，或点击浏览
                   </p>
                   <p className="text-xs text-muted-foreground/60 mt-1">
-                    支持 PNG、JPG、WebP 格式
+                    支持 PNG / JPEG / WebP / TIFF / EXR
                   </p>
                 </div>
 
@@ -1456,6 +1470,21 @@ export default function Lut3dModule() {
                 {/* Image result */}
                 {(applyImage || applyImageProcessed) && (
                   <div className="space-y-3">
+                    {/* Export format selector */}
+                    <div className="flex items-center gap-2">
+                      <Label className="text-xs text-muted-foreground">导出格式</Label>
+                      <Select value={applyExportFormat} onValueChange={(v) => setApplyExportFormat(v as ExportImageFormat)}>
+                        <SelectTrigger className="h-7 w-32 text-[10px]"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {EXPORT_FORMAT_OPTIONS.map((opt) => (
+                            <SelectItem key={opt.value} value={opt.value} className="text-xs">
+                              {opt.label}
+                              <span className="ml-1 text-muted-foreground">{opt.description}</span>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
                     <div className="grid grid-cols-2 gap-3">
                       {applyImage && (
                         <div className="space-y-1.5">
@@ -1470,9 +1499,8 @@ export default function Lut3dModule() {
                               variant="ghost"
                               size="sm"
                               className="h-6 px-1.5 text-[10px] gap-1"
-                              onClick={() => {
-                                const ext = originalImageType === 'image/jpeg' ? 'jpg' : originalImageType === 'image/webp' ? 'webp' : 'png';
-                                handleExportImage(applyImage, `original.${ext}`);
+                              onClick={async () => {
+                                await handleExportImage(applyImage, `original.${getFileExtension(applyExportFormat)}`);
                               }}
                             >
                               <Download className="w-3 h-3" />
@@ -1510,9 +1538,8 @@ export default function Lut3dModule() {
                               variant="ghost"
                               size="sm"
                               className="h-6 px-1.5 text-[10px] gap-1"
-                              onClick={() => {
-                                const ext = originalImageType === 'image/jpeg' ? 'jpg' : originalImageType === 'image/webp' ? 'webp' : 'png';
-                                handleExportImage(applyImageProcessed, `lut_processed.${ext}`);
+                              onClick={async () => {
+                                await handleExportImage(applyImageProcessed, `lut_processed.${getFileExtension(applyExportFormat)}`);
                               }}
                             >
                               <Download className="w-3 h-3" />
@@ -3150,7 +3177,7 @@ export default function Lut3dModule() {
                   variant="outline"
                   size="sm"
                   className="h-7 gap-1.5 text-xs"
-                  onClick={() => handleExportImage(imageViewSrc, `${imageViewTitle}.png`)}
+                  onClick={async () => await handleExportImage(imageViewSrc, `${imageViewTitle}.${getFileExtension(applyExportFormat)}`)}
                 >
                   <Download className="w-3.5 h-3.5" />
                   导出图片

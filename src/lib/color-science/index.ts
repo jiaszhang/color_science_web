@@ -12,3 +12,5 @@ export * from './lut3d';
 export * from './calibration';
 export * from './spectral-locus';
 export * from './image-loader';
+export * from './exr-decoder';
+export * from './image-formats';

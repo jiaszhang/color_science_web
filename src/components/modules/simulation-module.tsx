@@ -81,7 +81,13 @@ import {
   createColorSpaceLUT,
   applyLUTToImageData,
 } from '@/lib/color-science/lut3d';
-import { loadImageRaw } from '@/lib/color-science/image-loader';
+import { loadImageRaw, IMAGE_ACCEPT_STRING } from '@/lib/color-science/image-loader';
+import {
+  exportDataUrlAsFormat,
+  exportCanvasAsFormat,
+  EXPORT_FORMAT_OPTIONS,
+  type ExportImageFormat,
+} from '@/lib/color-science/image-formats';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -205,6 +211,8 @@ function ImageSimulationTab() {
   const [isDragging, setIsDragging] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [imageInfo, setImageInfo] = useState<{ width: number; height: number } | null>(null);
+  const [simExportFormat, setSimExportFormat] = useState<ExportImageFormat>('png');
+  const [patternExportFormat, setPatternExportFormat] = useState<ExportImageFormat>('png');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
@@ -213,7 +221,9 @@ function ImageSimulationTab() {
   const imageFileRef = useRef<File | null>(null); // keep File for raw loading
 
   const handleFile = useCallback((file: File) => {
-    if (!file.type.startsWith('image/')) return;
+    // Allow image/* types and EXR/TIFF files (which may not have image/ MIME type)
+    const isExrOrTiff = file.name.toLowerCase().endsWith('.exr') || file.name.toLowerCase().endsWith('.tiff') || file.name.toLowerCase().endsWith('.tif');
+    if (!file.type.startsWith('image/') && !isExrOrTiff) return;
     imageFileRef.current = file;
     setSimulatedSrc(null);
     setImageInfo(null);
@@ -284,13 +294,22 @@ function ImageSimulationTab() {
     });
   }, [srcGamut, srcTF, dstGamut, dstTF]);
 
-  const handleDownloadSimulated = useCallback(() => {
+  const handleDownloadSimulated = useCallback(async () => {
     if (!simulatedSrc) return;
-    const a = document.createElement('a');
-    a.href = simulatedSrc;
-    a.download = `simulated_${srcGamut}_to_${dstGamut}.png`;
-    a.click();
-  }, [simulatedSrc, srcGamut, dstGamut]);
+    try {
+      await exportDataUrlAsFormat(
+        simulatedSrc,
+        `simulated_${srcGamut}_to_${dstGamut}`,
+        simExportFormat
+      );
+    } catch {
+      // Fallback to simple PNG download
+      const a = document.createElement('a');
+      a.href = simulatedSrc;
+      a.download = `simulated_${srcGamut}_to_${dstGamut}.png`;
+      a.click();
+    }
+  }, [simulatedSrc, srcGamut, dstGamut, simExportFormat]);
 
   return (
     <div className="space-y-4">
@@ -389,7 +408,7 @@ function ImageSimulationTab() {
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*"
+              accept={IMAGE_ACCEPT_STRING}
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0];
@@ -399,6 +418,9 @@ function ImageSimulationTab() {
             <Upload className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
             <p className="text-sm text-muted-foreground">
               拖拽图片到此处或点击上传
+            </p>
+            <p className="text-xs text-muted-foreground/60 mt-0.5">
+              支持 PNG / JPEG / WebP / TIFF / EXR
             </p>
             {imageInfo && (
               <p className="text-xs text-muted-foreground mt-1">
@@ -418,10 +440,24 @@ function ImageSimulationTab() {
               {isSimulating ? '处理中...' : '仿真'}
             </Button>
             {simulatedSrc && (
-              <Button variant="outline" onClick={handleDownloadSimulated} className="gap-1">
-                <Download className="h-3.5 w-3.5" />
-                下载结果
-              </Button>
+              <div className="flex items-center gap-2">
+                <Select value={simExportFormat} onValueChange={(v) => setSimExportFormat(v as ExportImageFormat)}>
+                  <SelectTrigger className="h-8 w-28 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {EXPORT_FORMAT_OPTIONS.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value} className="text-xs">
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button variant="outline" onClick={handleDownloadSimulated} className="gap-1">
+                  <Download className="h-3.5 w-3.5" />
+                  下载结果
+                </Button>
+              </div>
             )}
           </div>
         </CardContent>
@@ -860,13 +896,22 @@ function RGBSimulationTab() {
     setPatternSrc(canvas.toDataURL('image/png'));
   }, [patternType, resW, resH, graySteps]);
 
-  const handleDownload = useCallback(() => {
+  const handleDownload = useCallback(async () => {
     if (!patternSrc) return;
-    const a = document.createElement('a');
-    a.href = patternSrc;
-    a.download = `test_pattern_${patternType}_${resW}x${resH}.png`;
-    a.click();
-  }, [patternSrc, patternType, resW, resH]);
+    try {
+      await exportDataUrlAsFormat(
+        patternSrc,
+        `test_pattern_${patternType}_${resW}x${resH}`,
+        patternExportFormat
+      );
+    } catch {
+      // Fallback
+      const a = document.createElement('a');
+      a.href = patternSrc;
+      a.download = `test_pattern_${patternType}_${resW}x${resH}.png`;
+      a.click();
+    }
+  }, [patternSrc, patternType, resW, resH, patternExportFormat]);
 
   return (
     <div className="space-y-4">
@@ -940,6 +985,14 @@ function RGBSimulationTab() {
               <Button onClick={generatePattern} className="gap-1 flex-1">
                 <Play className="h-3.5 w-3.5" /> 生成
               </Button>
+              <Select value={patternExportFormat} onValueChange={(v) => setPatternExportFormat(v as ExportImageFormat)}>
+                <SelectTrigger className="h-9 w-24 text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {EXPORT_FORMAT_OPTIONS.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value} className="text-xs">{opt.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
               <Button onClick={handleDownload} disabled={!patternSrc} variant="outline" className="gap-1">
                 <Download className="h-3.5 w-3.5" />
               </Button>
