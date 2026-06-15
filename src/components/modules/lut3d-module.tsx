@@ -17,6 +17,7 @@ import {
 } from '@/lib/color-science/lut3d';
 import { getGamutNames, getTransferFunctionNames, type TransferFunctionName } from '@/lib/color-science';
 import { xyYToXYZ, xyzToRgb, linearToRgb } from '@/lib/color-science/transform';
+import { loadImageRaw } from '@/lib/color-science/image-loader';
 import { useAppStore } from '@/lib/store/app-store';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -285,63 +286,68 @@ export default function Lut3dModule() {
       // Store original image metadata for faithful export
       setOriginalImageType(file.type || 'image/png');
       setOriginalFileName(file.name);
+      setApplyImageProcessed(null);
 
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const dataUrl = e.target?.result as string;
-        setApplyImage(dataUrl);
-        setApplyImageProcessed(null);
+      // Load image without ICC color conversion to preserve raw pixel values
+      loadImageRaw(file).then((rawResult) => {
+        // Use the raw dataUrl as the original preview (what processing actually sees)
+        setApplyImage(rawResult.dataUrl);
 
+        const canvas = applyCanvasRef.current;
+        if (!canvas) return;
+        // Use full original resolution for processing
+        canvas.width = rawResult.width;
+        canvas.height = rawResult.height;
+
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        ctx.drawImage(rawResult.canvas, 0, 0);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+        // Detect if original image has alpha channel (check if any alpha value is not 255)
+        let hasAlpha = false;
+        for (let i = 3; i < imageData.data.length; i += 4) {
+          if (imageData.data[i] !== 255) {
+            hasAlpha = true;
+            break;
+          }
+        }
+        setOriginalImageHasAlpha(hasAlpha);
+
+        const processed = applyLUTToImageData(lut, imageData);
+        ctx.putImageData(processed, 0, 0);
+
+        // Export in original format, preserving channel count
+        const mimeType = file.type || 'image/png';
+        let exportDataUrl: string;
+        if (hasAlpha || mimeType === 'image/png') {
+          // Keep alpha if present, or PNG format
+          exportDataUrl = canvas.toDataURL(mimeType);
+        } else {
+          // No alpha: create RGB-only output (3 channel)
+          const rgbCanvas = document.createElement('canvas');
+          rgbCanvas.width = rawResult.width;
+          rgbCanvas.height = rawResult.height;
+          const rgbCtx = rgbCanvas.getContext('2d')!;
+          rgbCtx.drawImage(canvas, 0, 0);
+          exportDataUrl = rgbCanvas.toDataURL(mimeType, 0.95);
+        }
+        setApplyImageProcessed(exportDataUrl);
+
+        // Store a synthetic Image element for full-res export later
         const img = new Image();
-        img.onload = () => {
-          // Store original image element for full-res export later
-          setOriginalImageElement(img);
-
-          const canvas = applyCanvasRef.current;
-          if (!canvas) return;
-          // Use full original resolution for processing
-          canvas.width = img.width;
-          canvas.height = img.height;
-
-          const ctx = canvas.getContext('2d');
-          if (!ctx) return;
-
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-          // Detect if original image has alpha channel (check if any alpha value is not 255)
-          let hasAlpha = false;
-          for (let i = 3; i < imageData.data.length; i += 4) {
-            if (imageData.data[i] !== 255) {
-              hasAlpha = true;
-              break;
-            }
-          }
-          setOriginalImageHasAlpha(hasAlpha);
-
-          const processed = applyLUTToImageData(lut, imageData);
-          ctx.putImageData(processed, 0, 0);
-
-          // Export in original format, preserving channel count
-          const mimeType = file.type || 'image/png';
-          let exportDataUrl: string;
-          if (hasAlpha || mimeType === 'image/png') {
-            // Keep alpha if present, or PNG format
-            exportDataUrl = canvas.toDataURL(mimeType);
-          } else {
-            // No alpha: create RGB-only output (3 channel)
-            const rgbCanvas = document.createElement('canvas');
-            rgbCanvas.width = img.width;
-            rgbCanvas.height = img.height;
-            const rgbCtx = rgbCanvas.getContext('2d')!;
-            rgbCtx.drawImage(canvas, 0, 0);
-            exportDataUrl = rgbCanvas.toDataURL(mimeType, 0.95);
-          }
-          setApplyImageProcessed(exportDataUrl);
+        img.onload = () => setOriginalImageElement(img);
+        img.src = rawResult.dataUrl;
+      }).catch(() => {
+        // Fallback: use FileReader if loadImageRaw fails
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const dataUrl = e.target?.result as string;
+          setApplyImage(dataUrl);
         };
-        img.src = dataUrl;
-      };
-      reader.readAsDataURL(file);
+        reader.readAsDataURL(file);
+      });
     },
     [applySelectedLutId, lutLibrary]
   );

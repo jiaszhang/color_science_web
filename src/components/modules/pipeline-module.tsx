@@ -21,6 +21,7 @@ import {
   rwToneCurve,
   type TMOParams,
 } from '@/lib/color-science/reference-white-tmo';
+import { loadImageRaw } from '@/lib/color-science/image-loader';
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -2235,6 +2236,7 @@ function BatchProcessTab() {
     srcUrl: string;
     dstUrl: string | null;
     status: 'pending' | 'processing' | 'done' | 'error';
+    file: File; // keep the original File for raw (no-ICC) loading
   }
   const [imageList, setImageList] = useState<ImageItem[]>([]);
   const [imageProcessing, setImageProcessing] = useState(false);
@@ -2245,35 +2247,49 @@ function BatchProcessTab() {
   const handleImageUpload = useCallback((files: FileList | null) => {
     if (!files || files.length === 0) return;
     const newItems: ImageItem[] = [];
+    const loadPromises: Promise<void>[] = [];
+
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       if (!file.type.startsWith('image/')) continue;
-      const url = URL.createObjectURL(file);
+      const itemId = `img_${Date.now()}_${i}_${Math.random().toString(36).substr(2, 5)}`;
+      // Start with a placeholder; will be updated once loadImageRaw resolves
       newItems.push({
-        id: `img_${Date.now()}_${i}_${Math.random().toString(36).substr(2, 5)}`,
+        id: itemId,
         name: file.name,
         width: 0,
         height: 0,
-        srcUrl: url,
+        srcUrl: '', // will be set from raw canvas
         dstUrl: null,
         status: 'pending',
+        file,
       });
-      // Load dimensions
-      const img = new Image();
+
+      // Load image without ICC conversion for correct preview
       const idx = newItems.length - 1;
-      img.onload = () => {
-        setImageList((prev) => {
-          const updated = [...prev];
-          const existIdx = updated.findIndex((item) => item.srcUrl === url);
-          if (existIdx >= 0) {
-            updated[existIdx] = { ...updated[existIdx], width: img.width, height: img.height };
-          }
-          return updated;
-        });
-      };
-      img.src = url;
+      loadPromises.push(
+        loadImageRaw(file).then((result) => {
+          newItems[idx] = {
+            ...newItems[idx],
+            width: result.width,
+            height: result.height,
+            srcUrl: result.dataUrl,
+          };
+        }).catch(() => {
+          // Fallback: use blob URL if loadImageRaw fails
+          newItems[idx] = {
+            ...newItems[idx],
+            srcUrl: URL.createObjectURL(file),
+          };
+        })
+      );
     }
+
+    // Add items immediately with placeholder, then update when loaded
     setImageList((prev) => [...prev, ...newItems]);
+    Promise.all(loadPromises).then(() => {
+      setImageList((prev) => [...prev]); // trigger re-render with updated data
+    });
   }, []);
 
   const handleProcessAllImages = useCallback(async () => {
@@ -2300,58 +2316,59 @@ function BatchProcessTab() {
 
       try {
         const item = updated[idx];
-        const result = await new Promise<string>((resolve, reject) => {
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-          img.onload = () => {
-            const origW = img.width;
-            const origH = img.height;
+        // Load image without ICC color conversion to preserve raw pixel values
+        const rawResult = await loadImageRaw(item.file);
+        const origW = rawResult.width;
+        const origH = rawResult.height;
 
-            // Downsample if needed
-            const procW = Math.max(1, Math.floor(origW / maxDownsample));
-            const procH = Math.max(1, Math.floor(origH / maxDownsample));
+        // Downsample if needed
+        const procW = Math.max(1, Math.floor(origW / maxDownsample));
+        const procH = Math.max(1, Math.floor(origH / maxDownsample));
 
-            // Draw to a smaller canvas for processing
-            const procCanvas = document.createElement('canvas');
-            procCanvas.width = procW;
-            procCanvas.height = procH;
-            const procCtx = procCanvas.getContext('2d');
-            if (!procCtx) { reject('Canvas context error'); return; }
-            procCtx.drawImage(img, 0, 0, procW, procH);
-            const imageData = procCtx.getImageData(0, 0, procW, procH);
-            const data = imageData.data;
+        // Draw to a processing canvas (already raw, just resize if needed)
+        let procCanvas: HTMLCanvasElement;
+        if (maxDownsample > 1 && (procW !== origW || procH !== origH)) {
+          procCanvas = document.createElement('canvas');
+          procCanvas.width = procW;
+          procCanvas.height = procH;
+          const procCtx = procCanvas.getContext('2d')!;
+          procCtx.drawImage(rawResult.canvas, 0, 0, procW, procH);
+        } else {
+          procCanvas = rawResult.canvas;
+        }
 
-            // Process pixels through pipeline
-            for (let i = 0; i < data.length; i += 4) {
-              let rgb: Vec3 = [data[i] / 255, data[i + 1] / 255, data[i + 2] / 255];
-              for (const node of pipeline.nodes) {
-                try { rgb = applyNode(node, rgb); } catch { break; }
-              }
-              data[i] = Math.round(clamp(rgb[0], 0, 1) * 255);
-              data[i + 1] = Math.round(clamp(rgb[1], 0, 1) * 255);
-              data[i + 2] = Math.round(clamp(rgb[2], 0, 1) * 255);
-            }
-            procCtx.putImageData(imageData, 0, 0);
+        const procCtx = procCanvas.getContext('2d', { willReadFrequently: true })!;
+        const imageData = procCtx.getImageData(0, 0, procCanvas.width, procCanvas.height);
+        const data = imageData.data;
 
-            // If downsampled, upscale back to original resolution
-            if (maxDownsample > 1 && (procW !== origW || procH !== origH)) {
-              const outCanvas = document.createElement('canvas');
-              outCanvas.width = origW;
-              outCanvas.height = origH;
-              const outCtx = outCanvas.getContext('2d');
-              if (!outCtx) { reject('Canvas context error'); return; }
-              outCtx.imageSmoothingEnabled = true;
-              outCtx.imageSmoothingQuality = 'high';
-              outCtx.drawImage(procCanvas, 0, 0, origW, origH);
-              resolve(outCanvas.toDataURL('image/png'));
-            } else {
-              resolve(procCanvas.toDataURL('image/png'));
-            }
-          };
-          img.onerror = () => reject('Image load error');
-          img.src = item.srcUrl;
-        });
-        updated[idx] = { ...updated[idx], dstUrl: result, status: 'done' };
+        // Process pixels through pipeline
+        for (let i = 0; i < data.length; i += 4) {
+          let rgb: Vec3 = [data[i] / 255, data[i + 1] / 255, data[i + 2] / 255];
+          for (const node of pipeline.nodes) {
+            try { rgb = applyNode(node, rgb); } catch { break; }
+          }
+          data[i] = Math.round(clamp(rgb[0], 0, 1) * 255);
+          data[i + 1] = Math.round(clamp(rgb[1], 0, 1) * 255);
+          data[i + 2] = Math.round(clamp(rgb[2], 0, 1) * 255);
+        }
+        procCtx.putImageData(imageData, 0, 0);
+
+        // If downsampled, upscale back to original resolution
+        let resultDataUrl: string;
+        if (maxDownsample > 1 && (procW !== origW || procH !== origH)) {
+          const outCanvas = document.createElement('canvas');
+          outCanvas.width = origW;
+          outCanvas.height = origH;
+          const outCtx = outCanvas.getContext('2d')!;
+          outCtx.imageSmoothingEnabled = true;
+          outCtx.imageSmoothingQuality = 'high';
+          outCtx.drawImage(procCanvas, 0, 0, origW, origH);
+          resultDataUrl = outCanvas.toDataURL('image/png');
+        } else {
+          resultDataUrl = procCanvas.toDataURL('image/png');
+        }
+
+        updated[idx] = { ...updated[idx], dstUrl: resultDataUrl, status: 'done' };
       } catch {
         updated[idx] = { ...updated[idx], status: 'error' };
       }

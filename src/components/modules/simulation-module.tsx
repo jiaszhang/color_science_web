@@ -81,6 +81,7 @@ import {
   createColorSpaceLUT,
   applyLUTToImageData,
 } from '@/lib/color-science/lut3d';
+import { loadImageRaw } from '@/lib/color-science/image-loader';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -209,13 +210,21 @@ function ImageSimulationTab() {
   const imageRef = useRef<HTMLImageElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const hiddenCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const imageFileRef = useRef<File | null>(null); // keep File for raw loading
 
   const handleFile = useCallback((file: File) => {
     if (!file.type.startsWith('image/')) return;
-    const url = URL.createObjectURL(file);
-    setImageSrc(url);
+    imageFileRef.current = file;
     setSimulatedSrc(null);
     setImageInfo(null);
+    // Load without ICC conversion for correct preview
+    loadImageRaw(file).then((result) => {
+      setImageSrc(result.dataUrl);
+      setImageInfo({ width: result.width, height: result.height });
+    }).catch(() => {
+      // Fallback to blob URL
+      setImageSrc(URL.createObjectURL(file));
+    });
   }, []);
 
   const handleDrop = useCallback(
@@ -245,19 +254,19 @@ function ImageSimulationTab() {
   }, []);
 
   const simulateImage = useCallback(() => {
-    if (!imageRef.current || !hiddenCanvasRef.current) return;
+    if (!imageFileRef.current) return;
     setIsSimulating(true);
 
-    // Use requestAnimationFrame to let UI update before heavy processing
-    requestAnimationFrame(() => {
+    // Load image without ICC conversion for correct pixel processing
+    loadImageRaw(imageFileRef.current).then((rawResult) => {
       try {
-        const img = imageRef.current!;
-        const canvas = hiddenCanvasRef.current!;
-        canvas.width = img.naturalWidth;
-        canvas.height = img.naturalHeight;
+        const canvas = hiddenCanvasRef.current;
+        if (!canvas) return;
+        canvas.width = rawResult.width;
+        canvas.height = rawResult.height;
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
-        ctx.drawImage(img, 0, 0);
+        ctx.drawImage(rawResult.canvas, 0, 0);
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
         const lut = createColorSpaceLUT(33, srcGamut, srcTF, dstGamut, dstTF);
@@ -270,6 +279,8 @@ function ImageSimulationTab() {
       } finally {
         setIsSimulating(false);
       }
+    }).catch(() => {
+      setIsSimulating(false);
     });
   }, [srcGamut, srcTF, dstGamut, dstTF]);
 

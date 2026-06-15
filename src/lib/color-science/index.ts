@@ -11,3 +11,4 @@ export * from './delta-e';
 export * from './lut3d';
 export * from './calibration';
 export * from './spectral-locus';
+export * from './image-loader';

@@ -10,6 +10,7 @@ import {
   type LUT3D,
 } from '@/lib/color-science/lut3d';
 import { useAppStore } from '@/lib/store/app-store';
+import { loadImageRaw, loadImageUrlRaw } from '@/lib/color-science/image-loader';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -58,23 +59,11 @@ function generateId(): string {
 }
 
 function loadImageToCanvas(src: string): Promise<{ canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D }> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      // Limit size for performance
-      const maxDim = 1024;
-      const scale = Math.min(maxDim / img.width, maxDim / img.height, 1);
-      canvas.width = Math.round(img.width * scale);
-      canvas.height = Math.round(img.height * scale);
-      const ctx = canvas.getContext('2d')!;
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      resolve({ canvas, ctx });
-    };
-    img.onerror = reject;
-    img.src = src;
-  });
+  // Load image without ICC color conversion to preserve raw pixel values
+  return loadImageUrlRaw(src, 1024).then((result) => ({
+    canvas: result.canvas,
+    ctx: result.ctx,
+  }));
 }
 
 function sampleImagePixels(
@@ -120,11 +109,17 @@ function ImageDropZone({
   const handleFile = useCallback(
     (file: File) => {
       if (!file.type.startsWith('image/')) return;
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        onImageLoad(e.target?.result as string, file.name);
-      };
-      reader.readAsDataURL(file);
+      // Load without ICC conversion to preserve raw pixel values
+      loadImageRaw(file, 512).then((result) => {
+        onImageLoad(result.dataUrl, file.name);
+      }).catch(() => {
+        // Fallback to FileReader if loadImageRaw fails
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          onImageLoad(e.target?.result as string, file.name);
+        };
+        reader.readAsDataURL(file);
+      });
     },
     [onImageLoad]
   );
