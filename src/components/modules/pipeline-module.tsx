@@ -16,6 +16,11 @@ import { getTransferFunctionNames, type TransferFunctionName, TRANSFER_FUNCTIONS
 import { type Vec3, type Mat3, mat3VecMultiply, mat3Invert, mat3Transpose, mat3Determinant } from '@/lib/color-science/matrices';
 import { computeDeltaEFromRGB } from '@/lib/color-science/delta-e';
 import { applyLUT3D, type LUT3D } from '@/lib/color-science/lut3d';
+import {
+  computeExposureParams,
+  rwToneCurve,
+  type TMOParams,
+} from '@/lib/color-science/reference-white-tmo';
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -86,6 +91,7 @@ import {
   CircleDot,
   MousePointerClick,
   PanelLeftClose,
+  Monitor,
 } from 'lucide-react';
 
 // ============ Types ============
@@ -122,6 +128,7 @@ const NODE_TYPES = [
   { type: 'gamma', label: 'Gamma', icon: SlidersHorizontal, color: 'text-amber-600 bg-amber-100', desc: 'Gamma 调整' },
   { type: 'lut-apply', label: '3DLUT 应用', icon: Box, color: 'text-emerald-600 bg-emerald-100', desc: '应用 3D LUT' },
   { type: 'tone-mapping', label: '色调映射', icon: Sun, color: 'text-orange-600 bg-orange-100', desc: 'HDR 色调映射' },
+  { type: 'ref-white-tmo', label: 'Ref.White TMO', icon: Monitor, color: 'text-sky-600 bg-sky-100', desc: '参考白色调映射' },
   { type: 'matrix-multiply', label: '矩阵运算', icon: Grid3X3, color: 'text-teal-600 bg-teal-100', desc: '自定义矩阵相乘' },
   { type: 'range-convert', label: '范围转换', icon: ArrowRight, color: 'text-rose-600 bg-rose-100', desc: 'Full/Limited Range' },
 ] as const;
@@ -163,6 +170,8 @@ function getNodeSummary(node: PipelineNode): string {
       return `${node.params.mode || '?'}`;
     case 'matrix-multiply':
       return '3×3 矩阵';
+    case 'ref-white-tmo':
+      return `Lc=${node.params.sourceImagePeak || '?'} Lw=${node.params.sourceImageReferenceWhite || '?'}`;
     case 'range-convert': {
       const src = node.params.srcRange === 'limited' ? 'Limited' : 'Full';
       const dst = node.params.dstRange === 'limited' ? 'Limited' : 'Full';
@@ -263,6 +272,42 @@ function applyNode(node: PipelineNode, input: Vec3): Vec3 {
       }
       return [clamp(r, 0, 1), clamp(g, 0, 1), clamp(b, 0, 1)];
     }
+    case 'ref-white-tmo': {
+      // Reference White TMO: apply per-pixel tone mapping
+      const p = node.params as {
+        sourceImagePeak: number;
+        sourceImageReferenceWhite: number;
+        mappingTargetReferenceWhite: number;
+        mappingTargetPeak: number;
+        sdrExposureAnchor: number;
+        minimumSdrExposure: number;
+        offsetAnchor: number;
+      };
+      const tmoParams: TMOParams = {
+        sourceImagePeak: p.sourceImagePeak ?? 1000,
+        sourceImageReferenceWhite: p.sourceImageReferenceWhite ?? 203,
+        mappingTargetReferenceWhite: p.mappingTargetReferenceWhite ?? 203,
+        mappingTargetPeak: p.mappingTargetPeak ?? 1000,
+        sdrExposureAnchor: p.sdrExposureAnchor ?? (1000 / 203),
+        minimumSdrExposure: p.minimumSdrExposure ?? 0.5,
+        offsetAnchor: p.offsetAnchor ?? (8 / 3),
+      };
+      const { outputExposure, sourceImageHeadroom, mappingTargetHeadroom } = computeExposureParams(tmoParams);
+      // input is assumed to be normalized linear RGB [0,1], treat as PQ-decoded / Lw
+      const rgbNorm = [input[0], input[1], input[2]];
+      const xMax = Math.max(...rgbNorm);
+      const Y_in = 0.2627 * rgbNorm[2] + 0.6780 * rgbNorm[1] + 0.0593 * rgbNorm[0];
+      const eps = 1e-6;
+      const x = (Math.max(Y_in, eps) + xMax) / 2.0;
+      const xArr = new Float32Array([x]);
+      const TC_x = rwToneCurve(outputExposure, sourceImageHeadroom, xArr, mappingTargetHeadroom);
+      const gain = x > 0 ? TC_x[0] / x : 0;
+      return [
+        clamp(rgbNorm[0] * gain, 0, 1),
+        clamp(rgbNorm[1] * gain, 0, 1),
+        clamp(rgbNorm[2] * gain, 0, 1),
+      ];
+    }
     default:
       return input;
   }
@@ -283,6 +328,16 @@ function createDefaultNode(type: string): PipelineNode {
       return { ...base, name: '3DLUT 应用', params: { lutId: '' } };
     case 'tone-mapping':
       return { ...base, name: '色调映射', params: { mode: 'reinhard' } };
+    case 'ref-white-tmo':
+      return { ...base, name: 'Ref.White TMO', params: {
+        sourceImagePeak: 1000,
+        sourceImageReferenceWhite: 203,
+        mappingTargetReferenceWhite: 203,
+        mappingTargetPeak: 1000,
+        sdrExposureAnchor: 1000 / 203,
+        minimumSdrExposure: 0.5,
+        offsetAnchor: 8 / 3,
+      } };
     case 'matrix-multiply':
       return { ...base, name: '矩阵运算', params: { matrix: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] } };
     case 'range-convert':
@@ -634,6 +689,173 @@ function NodeConfigPanel({
               </Select>
             </div>
           )}
+
+          {editNode.type === 'ref-white-tmo' && (() => {
+            const tmoParams: TMOParams = {
+              sourceImagePeak: (editNode.params.sourceImagePeak as number) ?? 1000,
+              sourceImageReferenceWhite: (editNode.params.sourceImageReferenceWhite as number) ?? 203,
+              mappingTargetReferenceWhite: (editNode.params.mappingTargetReferenceWhite as number) ?? 203,
+              mappingTargetPeak: (editNode.params.mappingTargetPeak as number) ?? 1000,
+              sdrExposureAnchor: (editNode.params.sdrExposureAnchor as number) ?? (1000 / 203),
+              minimumSdrExposure: (editNode.params.minimumSdrExposure as number) ?? 0.5,
+              offsetAnchor: (editNode.params.offsetAnchor as number) ?? (8 / 3),
+            };
+            const exposureResult = computeExposureParams(tmoParams);
+            const curveData = (() => {
+              const headroom = Math.max(exposureResult.sourceImageHeadroom, 1.0);
+              const numPoints = 200;
+              const xArr = new Float32Array(numPoints);
+              for (let i = 0; i < numPoints; i++) xArr[i] = (i / (numPoints - 1)) * headroom;
+              const yArr = rwToneCurve(exposureResult.outputExposure, exposureResult.sourceImageHeadroom, xArr, exposureResult.mappingTargetHeadroom);
+              return { xs: Array.from(xArr), ys: Array.from(yArr), headroom };
+            })();
+
+            return (
+              <div className="space-y-3">
+                <div className="space-y-0.5">
+                  <Label className="text-xs font-medium">Reference White TMO 参数</Label>
+                  <p className="text-[10px] text-muted-foreground">基于 ST.2084 PQ 的 HDR→SDR 色调映射</p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-[10px]">源峰值 Lc (cd/m²)</Label>
+                      <span className="text-[10px] font-mono text-muted-foreground">{tmoParams.sourceImagePeak.toFixed(0)}</span>
+                    </div>
+                    <Slider value={[tmoParams.sourceImagePeak]} onValueChange={([v]) => updateParam('sourceImagePeak', v)} min={100} max={4000} step={10} />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-[10px]">源参考白 Lw (cd/m²)</Label>
+                      <span className="text-[10px] font-mono text-muted-foreground">{tmoParams.sourceImageReferenceWhite.toFixed(0)}</span>
+                    </div>
+                    <Slider value={[tmoParams.sourceImageReferenceWhite]} onValueChange={([v]) => updateParam('sourceImageReferenceWhite', v)} min={50} max={500} step={1} />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-[10px]">目标参考白 (cd/m²)</Label>
+                      <span className="text-[10px] font-mono text-muted-foreground">{tmoParams.mappingTargetReferenceWhite.toFixed(0)}</span>
+                    </div>
+                    <Slider value={[tmoParams.mappingTargetReferenceWhite]} onValueChange={([v]) => updateParam('mappingTargetReferenceWhite', v)} min={50} max={500} step={1} />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-[10px]">目标峰值 (cd/m²)</Label>
+                      <span className="text-[10px] font-mono text-muted-foreground">{tmoParams.mappingTargetPeak.toFixed(0)}</span>
+                    </div>
+                    <Slider value={[tmoParams.mappingTargetPeak]} onValueChange={([v]) => updateParam('mappingTargetPeak', v)} min={200} max={4000} step={10} />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-[10px]">SDR 曝光锚点</Label>
+                      <span className="text-[10px] font-mono text-muted-foreground">{tmoParams.sdrExposureAnchor.toFixed(2)}</span>
+                    </div>
+                    <Slider value={[tmoParams.sdrExposureAnchor]} onValueChange={([v]) => updateParam('sdrExposureAnchor', v)} min={2} max={10} step={0.1} />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-[10px]">最小 SDR 曝光</Label>
+                      <span className="text-[10px] font-mono text-muted-foreground">{tmoParams.minimumSdrExposure.toFixed(2)}</span>
+                    </div>
+                    <Slider value={[tmoParams.minimumSdrExposure]} onValueChange={([v]) => updateParam('minimumSdrExposure', v)} min={0.1} max={1} step={0.05} />
+                  </div>
+                  <div className="space-y-1 col-span-2">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-[10px]">偏移锚点</Label>
+                      <span className="text-[10px] font-mono text-muted-foreground">{tmoParams.offsetAnchor.toFixed(2)}</span>
+                    </div>
+                    <Slider value={[tmoParams.offsetAnchor]} onValueChange={([v]) => updateParam('offsetAnchor', v)} min={1.5} max={5} step={0.1} />
+                  </div>
+                </div>
+
+                {/* Exposure info */}
+                <div className="grid grid-cols-3 gap-1 text-[10px]">
+                  <div className="bg-muted rounded px-1.5 py-1 text-center">
+                    <div className="text-muted-foreground">exposure</div>
+                    <div className="font-mono font-semibold">{exposureResult.outputExposure.toFixed(3)}</div>
+                  </div>
+                  <div className="bg-muted rounded px-1.5 py-1 text-center">
+                    <div className="text-muted-foreground">headroom_src</div>
+                    <div className="font-mono font-semibold">{exposureResult.sourceImageHeadroom.toFixed(3)}</div>
+                  </div>
+                  <div className="bg-muted rounded px-1.5 py-1 text-center">
+                    <div className="text-muted-foreground">headroom_tgt</div>
+                    <div className="font-mono font-semibold">{exposureResult.mappingTargetHeadroom.toFixed(3)}</div>
+                  </div>
+                </div>
+
+                <Separator />
+
+                {/* Tone curve preview */}
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium">TC(x) 曲线</Label>
+                  <div className="h-32 bg-white rounded-md border relative overflow-hidden">
+                    <canvas
+                      ref={(canvas) => {
+                        if (!canvas) return;
+                        const dpr = window.devicePixelRatio || 1;
+                        const displayW = canvas.clientWidth;
+                        const displayH = canvas.clientHeight;
+                        canvas.width = displayW * dpr;
+                        canvas.height = displayH * dpr;
+                        const ctx = canvas.getContext('2d');
+                        if (!ctx) return;
+                        ctx.scale(dpr, dpr);
+
+                        const padL = 35, padR = 10, padT = 10, padB = 25;
+                        const plotW = displayW - padL - padR;
+                        const plotH = displayH - padT - padB;
+
+                        ctx.fillStyle = '#fafafa';
+                        ctx.fillRect(0, 0, displayW, displayH);
+
+                        // Grid
+                        ctx.strokeStyle = '#e5e7eb';
+                        ctx.lineWidth = 0.5;
+                        for (let i = 0; i <= 4; i++) {
+                          const gy = padT + (plotH * i) / 4;
+                          ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(padL + plotW, gy); ctx.stroke();
+                          const gx = padL + (plotW * i) / 4;
+                          ctx.beginPath(); ctx.moveTo(gx, padT); ctx.lineTo(gx, padT + plotH); ctx.stroke();
+                        }
+
+                        // Axes
+                        ctx.strokeStyle = '#9ca3af';
+                        ctx.lineWidth = 1;
+                        ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + plotH); ctx.lineTo(padL + plotW, padT + plotH); ctx.stroke();
+
+                        const { xs, ys, headroom } = curveData;
+                        const xMax = headroom;
+                        const yMax = Math.max(...ys, 1);
+
+                        ctx.strokeStyle = '#0ea5e9';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        for (let i = 0; i < xs.length; i++) {
+                          const px = padL + (xs[i] / xMax) * plotW;
+                          const py = padT + plotH - (ys[i] / yMax) * plotH;
+                          if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+                        }
+                        ctx.stroke();
+
+                        // Labels
+                        ctx.fillStyle = '#9ca3af';
+                        ctx.font = '8px sans-serif';
+                        ctx.textAlign = 'center';
+                        ctx.fillText('0', padL, padT + plotH + 12);
+                        ctx.fillText(xMax.toFixed(1), padL + plotW, padT + plotH + 12);
+                        ctx.textAlign = 'right';
+                        ctx.fillText('0', padL - 3, padT + plotH);
+                        ctx.fillText(yMax.toFixed(2), padL - 3, padT + 4);
+                      }}
+                      className="w-full h-full"
+                    />
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
 
           {editNode.type === 'matrix-multiply' && (() => {
             const currentMatrix = (editNode.params.matrix as number[][]) || [[1,0,0],[0,1,0],[0,0,1]];
