@@ -286,17 +286,32 @@ function applyNode(node: PipelineNode, input: Vec3): Vec3 {
         downsampleFactor: number;
       };
       const tmoParams: TMOParams = {
-        sourceImagePeak: p.sourceImagePeak ?? 2500,
+        sourceImagePeak: p.sourceImagePeak ?? 1000,
         sourceImageReferenceWhite: p.sourceImageReferenceWhite ?? 203,
         mappingTargetReferenceWhite: p.mappingTargetReferenceWhite ?? 203,
-        mappingTargetPeak: p.mappingTargetPeak ?? 2500,
+        mappingTargetPeak: p.mappingTargetPeak ?? 1000,
         sdrExposureAnchor: p.sdrExposureAnchor ?? (1000 / 203),
         minimumSdrExposure: p.minimumSdrExposure ?? 0.5,
         offsetAnchor: p.offsetAnchor ?? (8 / 3),
       };
       const { outputExposure, sourceImageHeadroom, mappingTargetHeadroom } = computeExposureParams(tmoParams);
-      // input is assumed to be normalized linear RGB [0,1], treat as PQ-decoded / Lw
-      const rgbNorm = [input[0], input[1], input[2]];
+
+      // Input is sRGB-encoded [0,1]. We need to:
+      // 1. Decode sRGB to linear light
+      // 2. Scale to HDR luminance (multiply by sourceImagePeak) so values are in cd/m²
+      // 3. Normalize by sourceImageReferenceWhite for the TMO algorithm
+      const srgbToLinear = (v: number) => v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      const linR = srgbToLinear(input[0]);
+      const linG = srgbToLinear(input[1]);
+      const linB = srgbToLinear(input[2]);
+
+      // Scale linear values to HDR luminance range (cd/m²), then normalize by reference white
+      const rgbNorm = [
+        (linR * tmoParams.sourceImagePeak) / tmoParams.sourceImageReferenceWhite,
+        (linG * tmoParams.sourceImagePeak) / tmoParams.sourceImageReferenceWhite,
+        (linB * tmoParams.sourceImagePeak) / tmoParams.sourceImageReferenceWhite,
+      ];
+
       const xMax = Math.max(...rgbNorm);
       const Y_in = 0.2627 * rgbNorm[2] + 0.6780 * rgbNorm[1] + 0.0593 * rgbNorm[0];
       const eps = 1e-6;
@@ -332,10 +347,10 @@ function createDefaultNode(type: string): PipelineNode {
       return { ...base, name: '色调映射', params: { mode: 'reinhard' } };
     case 'ref-white-tmo':
       return { ...base, name: 'Ref.White TMO', params: {
-        sourceImagePeak: 2500,
+        sourceImagePeak: 1000,
         sourceImageReferenceWhite: 203,
         mappingTargetReferenceWhite: 203,
-        mappingTargetPeak: 2500,
+        mappingTargetPeak: 1000,
         sdrExposureAnchor: 1000 / 203,
         minimumSdrExposure: 0.5,
         offsetAnchor: 8 / 3,
@@ -695,10 +710,10 @@ function NodeConfigPanel({
 
           {editNode.type === 'ref-white-tmo' && (() => {
             const tmoParams: TMOParams = {
-              sourceImagePeak: (editNode.params.sourceImagePeak as number) ?? 2500,
+              sourceImagePeak: (editNode.params.sourceImagePeak as number) ?? 1000,
               sourceImageReferenceWhite: (editNode.params.sourceImageReferenceWhite as number) ?? 203,
               mappingTargetReferenceWhite: (editNode.params.mappingTargetReferenceWhite as number) ?? 203,
-              mappingTargetPeak: (editNode.params.mappingTargetPeak as number) ?? 2500,
+              mappingTargetPeak: (editNode.params.mappingTargetPeak as number) ?? 1000,
               sdrExposureAnchor: (editNode.params.sdrExposureAnchor as number) ?? (1000 / 203),
               minimumSdrExposure: (editNode.params.minimumSdrExposure as number) ?? 0.5,
               offsetAnchor: (editNode.params.offsetAnchor as number) ?? (8 / 3),

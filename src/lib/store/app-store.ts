@@ -471,7 +471,7 @@ export const useAppStore = create<AppState>()(
       merge: (persisted, current) => {
         const p = persisted as Record<string, unknown>;
 
-        // Migrate ref-white-tmo default sourceImagePeak from 1000 to 2500
+        // Migrate ref-white-tmo default sourceImagePeak from 2500 back to 1000
         const pipelines = Array.isArray(p.pipelines)
           ? p.pipelines.map((pipeline: any) => ({
               ...pipeline,
@@ -479,10 +479,10 @@ export const useAppStore = create<AppState>()(
                 ? pipeline.nodes.map((node: any) => {
                     if (node.type === 'ref-white-tmo' && node.params) {
                       const params = { ...node.params };
-                      // Migrate sourceImagePeak: 1000 → 2500 (old default)
-                      if (params.sourceImagePeak === 1000) params.sourceImagePeak = 2500;
-                      // Migrate mappingTargetPeak: 1000 → 2500 (old default)
-                      if (params.mappingTargetPeak === 1000) params.mappingTargetPeak = 2500;
+                      // Migrate sourceImagePeak: 2500 → 1000 (reverted default)
+                      if (params.sourceImagePeak === 2500) params.sourceImagePeak = 1000;
+                      // Migrate mappingTargetPeak: 2500 → 1000 (reverted default)
+                      if (params.mappingTargetPeak === 2500) params.mappingTargetPeak = 1000;
                       return { ...node, params };
                     }
                     return node;
@@ -499,8 +499,8 @@ export const useAppStore = create<AppState>()(
                 ? preset.nodes.map((node: any) => {
                     if (node.type === 'ref-white-tmo' && node.params) {
                       const params = { ...node.params };
-                      if (params.sourceImagePeak === 1000) params.sourceImagePeak = 2500;
-                      if (params.mappingTargetPeak === 1000) params.mappingTargetPeak = 2500;
+                      if (params.sourceImagePeak === 2500) params.sourceImagePeak = 1000;
+                      if (params.mappingTargetPeak === 2500) params.mappingTargetPeak = 1000;
                       return { ...node, params };
                     }
                     return node;
