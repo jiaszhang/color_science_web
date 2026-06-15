@@ -23,6 +23,7 @@ import {
   Target,
   Eye,
   BarChart3,
+  Sun,
   ChevronDown,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -59,6 +60,10 @@ const PipelineModule = dynamic(
 );
 const VisualizationModule = dynamic(
   () => import('@/components/modules/visualization-module'),
+  { ssr: false, loading: () => <ModuleLoadingSkeleton /> }
+);
+const TmoModule = dynamic(
+  () => import('@/components/modules/tmo-module'),
   { ssr: false, loading: () => <ModuleLoadingSkeleton /> }
 );
 
@@ -172,6 +177,14 @@ const modules: ModuleConfig[] = [
       { id: 'interaction', name: '交互增强' },
     ],
   },
+  {
+    id: 'tmo',
+    name: 'HDR TMO',
+    icon: Sun,
+    subItems: [
+      { id: 'rw-tmo', name: 'Reference White TMO' },
+    ],
+  },
 ];
 
 export default function Home() {
@@ -221,6 +234,8 @@ export default function Home() {
         return <SimulationModule />;
       case 'visualization':
         return <VisualizationModule />;
+      case 'tmo':
+        return <TmoModule />;
       default:
         return <ColorFundamentalsModule />;
     }

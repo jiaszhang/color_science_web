@@ -13,7 +13,8 @@ export type ModuleId =
   | 'lut3d'
   | 'gamut-calibration'
   | 'simulation'
-  | 'visualization';
+  | 'visualization'
+  | 'tmo';
 
 export interface PipelineNode {
   id: string;
