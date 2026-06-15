@@ -289,7 +289,7 @@ function applyNode(node: PipelineNode, input: Vec3): Vec3 {
         sourceImagePeak: p.sourceImagePeak ?? 2500,
         sourceImageReferenceWhite: p.sourceImageReferenceWhite ?? 203,
         mappingTargetReferenceWhite: p.mappingTargetReferenceWhite ?? 203,
-        mappingTargetPeak: p.mappingTargetPeak ?? 1000,
+        mappingTargetPeak: p.mappingTargetPeak ?? 2500,
         sdrExposureAnchor: p.sdrExposureAnchor ?? (1000 / 203),
         minimumSdrExposure: p.minimumSdrExposure ?? 0.5,
         offsetAnchor: p.offsetAnchor ?? (8 / 3),
@@ -698,7 +698,7 @@ function NodeConfigPanel({
               sourceImagePeak: (editNode.params.sourceImagePeak as number) ?? 2500,
               sourceImageReferenceWhite: (editNode.params.sourceImageReferenceWhite as number) ?? 203,
               mappingTargetReferenceWhite: (editNode.params.mappingTargetReferenceWhite as number) ?? 203,
-              mappingTargetPeak: (editNode.params.mappingTargetPeak as number) ?? 1000,
+              mappingTargetPeak: (editNode.params.mappingTargetPeak as number) ?? 2500,
               sdrExposureAnchor: (editNode.params.sdrExposureAnchor as number) ?? (1000 / 203),
               minimumSdrExposure: (editNode.params.minimumSdrExposure as number) ?? 0.5,
               offsetAnchor: (editNode.params.offsetAnchor as number) ?? (8 / 3),
@@ -2667,14 +2667,20 @@ function BatchProcessTab() {
                       {/* Thumbnail — clickable for preview */}
                       <button
                         className="w-16 h-16 rounded-md border overflow-hidden bg-checkered flex-shrink-0 cursor-pointer relative"
-                        onClick={() => setPreviewItem(item)}
+                        onClick={() => item.srcUrl && setPreviewItem(item)}
                         title={item.status === 'done' ? '点击预览前后对比' : '点击预览'}
                       >
-                        <img
-                          src={item.dstUrl || item.srcUrl}
-                          alt={item.name}
-                          className="w-full h-full object-cover"
-                        />
+                        {(item.dstUrl || item.srcUrl) ? (
+                          <img
+                            src={item.dstUrl || item.srcUrl}
+                            alt={item.name}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-muted-foreground/40">
+                            <ImageIcon className="w-5 h-5" />
+                          </div>
+                        )}
                         {item.status === 'done' && (
                           <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">
                             <Eye className="w-5 h-5 text-white" />

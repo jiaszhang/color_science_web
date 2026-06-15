@@ -470,9 +470,50 @@ export const useAppStore = create<AppState>()(
       }),
       merge: (persisted, current) => {
         const p = persisted as Record<string, unknown>;
+
+        // Migrate ref-white-tmo default sourceImagePeak from 1000 to 2500
+        const pipelines = Array.isArray(p.pipelines)
+          ? p.pipelines.map((pipeline: any) => ({
+              ...pipeline,
+              nodes: Array.isArray(pipeline.nodes)
+                ? pipeline.nodes.map((node: any) => {
+                    if (node.type === 'ref-white-tmo' && node.params) {
+                      const params = { ...node.params };
+                      // Migrate sourceImagePeak: 1000 → 2500 (old default)
+                      if (params.sourceImagePeak === 1000) params.sourceImagePeak = 2500;
+                      // Migrate mappingTargetPeak: 1000 → 2500 (old default)
+                      if (params.mappingTargetPeak === 1000) params.mappingTargetPeak = 2500;
+                      return { ...node, params };
+                    }
+                    return node;
+                  })
+                : pipeline.nodes,
+            }))
+          : p.pipelines;
+
+        // Also migrate customPresets
+        const customPresets = Array.isArray(p.customPresets)
+          ? p.customPresets.map((preset: any) => ({
+              ...preset,
+              nodes: Array.isArray(preset.nodes)
+                ? preset.nodes.map((node: any) => {
+                    if (node.type === 'ref-white-tmo' && node.params) {
+                      const params = { ...node.params };
+                      if (params.sourceImagePeak === 1000) params.sourceImagePeak = 2500;
+                      if (params.mappingTargetPeak === 1000) params.mappingTargetPeak = 2500;
+                      return { ...node, params };
+                    }
+                    return node;
+                  })
+                : preset.nodes,
+            }))
+          : p.customPresets;
+
         return {
           ...current,
           ...p,
+          pipelines,
+          customPresets,
           // Rehydrate Set from array
           lockedParams: Array.isArray(p.lockedParams) ? new Set(p.lockedParams) : current.lockedParams,
           // lutLibrary is not persisted (Float32Array), always reset
