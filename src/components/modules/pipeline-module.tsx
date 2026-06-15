@@ -282,6 +282,7 @@ function applyNode(node: PipelineNode, input: Vec3): Vec3 {
         sdrExposureAnchor: number;
         minimumSdrExposure: number;
         offsetAnchor: number;
+        downsampleFactor: number;
       };
       const tmoParams: TMOParams = {
         sourceImagePeak: p.sourceImagePeak ?? 1000,
@@ -337,6 +338,7 @@ function createDefaultNode(type: string): PipelineNode {
         sdrExposureAnchor: 1000 / 203,
         minimumSdrExposure: 0.5,
         offsetAnchor: 8 / 3,
+        downsampleFactor: 1,
       } };
     case 'matrix-multiply':
       return { ...base, name: '矩阵运算', params: { matrix: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] } };
@@ -700,6 +702,7 @@ function NodeConfigPanel({
               minimumSdrExposure: (editNode.params.minimumSdrExposure as number) ?? 0.5,
               offsetAnchor: (editNode.params.offsetAnchor as number) ?? (8 / 3),
             };
+            const downsampleFactor = (editNode.params.downsampleFactor as number) ?? 1;
             const exposureResult = computeExposureParams(tmoParams);
             const curveData = (() => {
               const headroom = Math.max(exposureResult.sourceImageHeadroom, 1.0);
@@ -760,12 +763,19 @@ function NodeConfigPanel({
                     </div>
                     <Slider value={[tmoParams.minimumSdrExposure]} onValueChange={([v]) => updateParam('minimumSdrExposure', v)} min={0.1} max={1} step={0.05} />
                   </div>
-                  <div className="space-y-1 col-span-2">
+                  <div className="space-y-1">
                     <div className="flex items-center justify-between">
                       <Label className="text-[10px]">偏移锚点</Label>
                       <span className="text-[10px] font-mono text-muted-foreground">{tmoParams.offsetAnchor.toFixed(2)}</span>
                     </div>
                     <Slider value={[tmoParams.offsetAnchor]} onValueChange={([v]) => updateParam('offsetAnchor', v)} min={1.5} max={5} step={0.1} />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-[10px]">下采样因子</Label>
+                      <span className="text-[10px] font-mono text-muted-foreground">{downsampleFactor}</span>
+                    </div>
+                    <Slider value={[downsampleFactor]} onValueChange={([v]) => updateParam('downsampleFactor', v)} min={1} max={8} step={1} />
                   </div>
                 </div>
 
@@ -787,10 +797,10 @@ function NodeConfigPanel({
 
                 <Separator />
 
-                {/* Tone curve preview */}
+                {/* Tone curve preview — square aspect ratio */}
                 <div className="space-y-1">
                   <Label className="text-xs font-medium">TC(x) 曲线</Label>
-                  <div className="h-32 bg-white rounded-md border relative overflow-hidden">
+                  <div className="bg-white rounded-md border relative overflow-hidden" style={{ aspectRatio: '1 / 1' }}>
                     <canvas
                       ref={(canvas) => {
                         if (!canvas) return;
@@ -803,51 +813,97 @@ function NodeConfigPanel({
                         if (!ctx) return;
                         ctx.scale(dpr, dpr);
 
-                        const padL = 35, padR = 10, padT = 10, padB = 25;
+                        const padL = 40, padR = 12, padT = 12, padB = 30;
                         const plotW = displayW - padL - padR;
                         const plotH = displayH - padT - padB;
 
                         ctx.fillStyle = '#fafafa';
                         ctx.fillRect(0, 0, displayW, displayH);
 
-                        // Grid
-                        ctx.strokeStyle = '#e5e7eb';
-                        ctx.lineWidth = 0.5;
-                        for (let i = 0; i <= 4; i++) {
-                          const gy = padT + (plotH * i) / 4;
-                          ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(padL + plotW, gy); ctx.stroke();
-                          const gx = padL + (plotW * i) / 4;
-                          ctx.beginPath(); ctx.moveTo(gx, padT); ctx.lineTo(gx, padT + plotH); ctx.stroke();
-                        }
-
-                        // Axes
-                        ctx.strokeStyle = '#9ca3af';
-                        ctx.lineWidth = 1;
-                        ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + plotH); ctx.lineTo(padL + plotW, padT + plotH); ctx.stroke();
+                        // Plot area background
+                        ctx.fillStyle = '#ffffff';
+                        ctx.fillRect(padL, padT, plotW, plotH);
 
                         const { xs, ys, headroom } = curveData;
                         const xMax = headroom;
                         const yMax = Math.max(...ys, 1);
 
+                        // Helper: data coords to pixel coords
+                        const toPixelX = (v: number) => padL + (v / xMax) * plotW;
+                        const toPixelY = (v: number) => padT + plotH - (v / yMax) * plotH;
+
+                        // Grid lines with tick labels
+                        const numTicks = 5;
+                        ctx.strokeStyle = '#e5e7eb';
+                        ctx.lineWidth = 0.5;
+                        ctx.fillStyle = '#6b7280';
+                        ctx.font = '9px sans-serif';
+                        for (let i = 0; i <= numTicks; i++) {
+                          const xVal = (xMax * i) / numTicks;
+                          const yVal = (yMax * i) / numTicks;
+                          const gx = toPixelX(xVal);
+                          const gy = toPixelY(yVal);
+
+                          // Vertical grid line
+                          ctx.beginPath(); ctx.moveTo(gx, padT); ctx.lineTo(gx, padT + plotH); ctx.stroke();
+                          // Horizontal grid line
+                          ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(padL + plotW, gy); ctx.stroke();
+
+                          // X-axis tick labels
+                          ctx.textAlign = 'center';
+                          ctx.textBaseline = 'top';
+                          ctx.fillText(xVal.toFixed(1), gx, padT + plotH + 4);
+                          // Y-axis tick labels
+                          ctx.textAlign = 'right';
+                          ctx.textBaseline = 'middle';
+                          ctx.fillText(yVal.toFixed(1), padL - 4, gy);
+                        }
+
+                        // x = y reference line (light dashed)
+                        ctx.save();
+                        ctx.strokeStyle = '#d1d5db';
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([4, 3]);
+                        ctx.beginPath();
+                        const refMin = Math.min(xMax, yMax);
+                        ctx.moveTo(toPixelX(0), toPixelY(0));
+                        ctx.lineTo(toPixelX(refMin), toPixelY(refMin));
+                        ctx.stroke();
+                        ctx.restore();
+
+                        // Axes border
+                        ctx.strokeStyle = '#9ca3af';
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.moveTo(padL, padT);
+                        ctx.lineTo(padL, padT + plotH);
+                        ctx.lineTo(padL + plotW, padT + plotH);
+                        ctx.stroke();
+
+                        // Tone curve
                         ctx.strokeStyle = '#0ea5e9';
                         ctx.lineWidth = 2;
                         ctx.beginPath();
                         for (let i = 0; i < xs.length; i++) {
-                          const px = padL + (xs[i] / xMax) * plotW;
-                          const py = padT + plotH - (ys[i] / yMax) * plotH;
+                          const px = toPixelX(xs[i]);
+                          const py = toPixelY(ys[i]);
                           if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
                         }
                         ctx.stroke();
 
-                        // Labels
-                        ctx.fillStyle = '#9ca3af';
-                        ctx.font = '8px sans-serif';
+                        // Axis titles
+                        ctx.fillStyle = '#6b7280';
+                        ctx.font = '10px sans-serif';
                         ctx.textAlign = 'center';
-                        ctx.fillText('0', padL, padT + plotH + 12);
-                        ctx.fillText(xMax.toFixed(1), padL + plotW, padT + plotH + 12);
-                        ctx.textAlign = 'right';
-                        ctx.fillText('0', padL - 3, padT + plotH);
-                        ctx.fillText(yMax.toFixed(2), padL - 3, padT + 4);
+                        ctx.textBaseline = 'top';
+                        ctx.fillText('x (headroom)', padL + plotW / 2, padT + plotH + 16);
+                        ctx.save();
+                        ctx.translate(10, padT + plotH / 2);
+                        ctx.rotate(-Math.PI / 2);
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'bottom';
+                        ctx.fillText('TC(x)', 0, 0);
+                        ctx.restore();
                       }}
                       className="w-full h-full"
                     />
@@ -2227,6 +2283,15 @@ function BatchProcessTab() {
     const total = imageList.length;
     setImageProgress({ current: 0, total });
 
+    // Find the maximum downsample factor from any ref-white-tmo node in the pipeline
+    let maxDownsample = 1;
+    for (const node of pipeline.nodes) {
+      if (node.type === 'ref-white-tmo') {
+        const ds = (node.params.downsampleFactor as number) ?? 1;
+        if (ds > maxDownsample) maxDownsample = ds;
+      }
+    }
+
     const updated = [...imageList];
 
     for (let idx = 0; idx < total; idx++) {
@@ -2240,15 +2305,24 @@ function BatchProcessTab() {
           const img = new Image();
           img.crossOrigin = 'anonymous';
           img.onload = () => {
-            const canvas = document.createElement('canvas');
-            canvas.width = img.width;
-            canvas.height = img.height;
-            const ctx = canvas.getContext('2d');
-            if (!ctx) { reject('Canvas context error'); return; }
-            ctx.drawImage(img, 0, 0);
-            const imageData = ctx.getImageData(0, 0, img.width, img.height);
+            const origW = img.width;
+            const origH = img.height;
+
+            // Downsample if needed
+            const procW = Math.max(1, Math.floor(origW / maxDownsample));
+            const procH = Math.max(1, Math.floor(origH / maxDownsample));
+
+            // Draw to a smaller canvas for processing
+            const procCanvas = document.createElement('canvas');
+            procCanvas.width = procW;
+            procCanvas.height = procH;
+            const procCtx = procCanvas.getContext('2d');
+            if (!procCtx) { reject('Canvas context error'); return; }
+            procCtx.drawImage(img, 0, 0, procW, procH);
+            const imageData = procCtx.getImageData(0, 0, procW, procH);
             const data = imageData.data;
 
+            // Process pixels through pipeline
             for (let i = 0; i < data.length; i += 4) {
               let rgb: Vec3 = [data[i] / 255, data[i + 1] / 255, data[i + 2] / 255];
               for (const node of pipeline.nodes) {
@@ -2258,8 +2332,22 @@ function BatchProcessTab() {
               data[i + 1] = Math.round(clamp(rgb[1], 0, 1) * 255);
               data[i + 2] = Math.round(clamp(rgb[2], 0, 1) * 255);
             }
-            ctx.putImageData(imageData, 0, 0);
-            resolve(canvas.toDataURL('image/png'));
+            procCtx.putImageData(imageData, 0, 0);
+
+            // If downsampled, upscale back to original resolution
+            if (maxDownsample > 1 && (procW !== origW || procH !== origH)) {
+              const outCanvas = document.createElement('canvas');
+              outCanvas.width = origW;
+              outCanvas.height = origH;
+              const outCtx = outCanvas.getContext('2d');
+              if (!outCtx) { reject('Canvas context error'); return; }
+              outCtx.imageSmoothingEnabled = true;
+              outCtx.imageSmoothingQuality = 'high';
+              outCtx.drawImage(procCanvas, 0, 0, origW, origH);
+              resolve(outCanvas.toDataURL('image/png'));
+            } else {
+              resolve(procCanvas.toDataURL('image/png'));
+            }
           };
           img.onerror = () => reject('Image load error');
           img.src = item.srcUrl;
