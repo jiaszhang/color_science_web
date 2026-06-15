@@ -978,6 +978,7 @@ function ValueComparisonTab() {
   const [inputB, setInputB] = useState('0.8');
   const [resultA, setResultA] = useState<PipelineResult | null>(null);
   const [resultB, setResultB] = useState<PipelineResult | null>(null);
+  const [rgbRange, setRgbRange] = useState<'0-1' | '0-255'>('0-1');
 
   const computePipeline = useCallback(
     (r: number, g: number, b: number, gamut: string, tf: TransferFunctionName): PipelineResult => {
@@ -1017,16 +1018,29 @@ function ValueComparisonTab() {
   );
 
   const handleCompare = useCallback(() => {
-    const r = parseFloat(inputR) || 0;
-    const g = parseFloat(inputG) || 0;
-    const b = parseFloat(inputB) || 0;
+    const scale = rgbRange === '0-255' ? 1 / 255 : 1;
+    const r = (parseFloat(inputR) || 0) * scale;
+    const g = (parseFloat(inputG) || 0) * scale;
+    const b = (parseFloat(inputB) || 0) * scale;
 
     const a = computePipeline(r, g, b, pipelineA.gamut, pipelineA.tf);
     const bResult = computePipeline(r, g, b, pipelineB.gamut, pipelineB.tf);
 
     setResultA(a);
     setResultB(bResult);
-  }, [inputR, inputG, inputB, pipelineA, pipelineB, computePipeline]);
+  }, [inputR, inputG, inputB, pipelineA, pipelineB, computePipeline, rgbRange]);
+
+  const handleRangeSwitch = useCallback((newRange: '0-1' | '0-255') => {
+    const oldScale = rgbRange === '0-255' ? 255 : 1;
+    const newScale = newRange === '0-255' ? 255 : 1;
+    const r = (parseFloat(inputR) || 0) / oldScale * newScale;
+    const g = (parseFloat(inputG) || 0) / oldScale * newScale;
+    const b = (parseFloat(inputB) || 0) / oldScale * newScale;
+    setInputR(r.toFixed(newRange === '0-255' ? 0 : 4));
+    setInputG(g.toFixed(newRange === '0-255' ? 0 : 4));
+    setInputB(b.toFixed(newRange === '0-255' ? 0 : 4));
+    setRgbRange(newRange);
+  }, [rgbRange, inputR, inputG, inputB]);
 
   const fmt = (n: number, digits = 6) => Number(n).toFixed(digits);
 
@@ -1169,15 +1183,29 @@ function ValueComparisonTab() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label className="text-sm font-medium">输入 RGB (0-1)</Label>
+            <div className="flex items-center gap-2">
+              <Label className="text-sm font-medium">输入 RGB</Label>
+              <div className="flex rounded-md border overflow-hidden h-6">
+                <button
+                  type="button"
+                  className={`px-2 text-[10px] font-medium transition-colors ${rgbRange === '0-1' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'}`}
+                  onClick={() => handleRangeSwitch('0-1')}
+                >0-1</button>
+                <button
+                  type="button"
+                  className={`px-2 text-[10px] font-medium transition-colors ${rgbRange === '0-255' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'}`}
+                  onClick={() => handleRangeSwitch('0-255')}
+                >0-255</button>
+              </div>
+            </div>
             <div className="grid grid-cols-3 gap-2 max-w-xs">
               <div>
                 <Label className="text-[10px] text-muted-foreground">R</Label>
                 <Input
                   type="number"
                   min="0"
-                  max="1"
-                  step="0.01"
+                  max={rgbRange === '0-255' ? '255' : '1'}
+                  step={rgbRange === '0-255' ? '1' : '0.01'}
                   value={inputR}
                   onChange={(e) => setInputR(e.target.value)}
                   className="h-8"
@@ -1188,8 +1216,8 @@ function ValueComparisonTab() {
                 <Input
                   type="number"
                   min="0"
-                  max="1"
-                  step="0.01"
+                  max={rgbRange === '0-255' ? '255' : '1'}
+                  step={rgbRange === '0-255' ? '1' : '0.01'}
                   value={inputG}
                   onChange={(e) => setInputG(e.target.value)}
                   className="h-8"
@@ -1200,8 +1228,8 @@ function ValueComparisonTab() {
                 <Input
                   type="number"
                   min="0"
-                  max="1"
-                  step="0.01"
+                  max={rgbRange === '0-255' ? '255' : '1'}
+                  step={rgbRange === '0-255' ? '1' : '0.01'}
                   value={inputB}
                   onChange={(e) => setInputB(e.target.value)}
                   className="h-8"
@@ -1294,6 +1322,7 @@ function ErrorAssessmentTab() {
   const [method, setMethod] = useState<'76' | '94' | '2000'>('2000');
   const [autoConvert, setAutoConvert] = useState(false);
   const [autoGamut, setAutoGamut] = useState('DCI_P3');
+  const [rgbRange, setRgbRange] = useState<'0-1' | '0-255'>('0-1');
   const [currentResult, setCurrentResult] = useState<{
     deltaE: number;
     lab1: { L: number; a: number; b: number };
@@ -1303,15 +1332,29 @@ function ErrorAssessmentTab() {
   const [batch, setBatch] = useState<DeltaEBatchEntry[]>([]);
   const nextIdRef = useRef(1);
 
+  const rgbScale = rgbRange === '0-255' ? 1 / 255 : 1;
+
+  const handleRangeSwitch = useCallback((newRange: '0-1' | '0-255') => {
+    const oldScale = rgbRange === '0-255' ? 255 : 1;
+    const newScale = newRange === '0-255' ? 255 : 1;
+    const fmt = (v: string) => {
+      const n = (parseFloat(v) || 0) / oldScale * newScale;
+      return newRange === '0-255' ? n.toFixed(0) : n.toFixed(4);
+    };
+    setRefR(fmt(refR)); setRefG(fmt(refG)); setRefB(fmt(refB));
+    setTestR(fmt(testR)); setTestG(fmt(testG)); setTestB(fmt(testB));
+    setRgbRange(newRange);
+  }, [rgbRange, refR, refG, refB, testR, testG, testB]);
+
   const handleCalculate = useCallback(() => {
     try {
-      let rr = parseFloat(refR) || 0;
-      let rg = parseFloat(refG) || 0;
-      let rb = parseFloat(refB) || 0;
+      let rr = (parseFloat(refR) || 0) * rgbScale;
+      let rg = (parseFloat(refG) || 0) * rgbScale;
+      let rb = (parseFloat(refB) || 0) * rgbScale;
 
-      let tr = parseFloat(testR) || 0;
-      let tg = parseFloat(testG) || 0;
-      let tb = parseFloat(testB) || 0;
+      let tr = (parseFloat(testR) || 0) * rgbScale;
+      let tg = (parseFloat(testG) || 0) * rgbScale;
+      let tb = (parseFloat(testB) || 0) * rgbScale;
 
       // Clamp to 0-1
       rr = Math.max(0, Math.min(1, rr));
@@ -1355,18 +1398,18 @@ function ErrorAssessmentTab() {
     } catch (err) {
       console.error('Delta E calculation error:', err);
     }
-  }, [refR, refG, refB, testR, testG, testB, method, autoConvert, autoGamut]);
+  }, [refR, refG, refB, testR, testG, testB, method, autoConvert, autoGamut, rgbScale]);
 
   const handleAddToBatch = useCallback(() => {
     if (!currentResult) return;
     const entry: DeltaEBatchEntry = {
       id: nextIdRef.current++,
-      refR: parseFloat(refR) || 0,
-      refG: parseFloat(refG) || 0,
-      refB: parseFloat(refB) || 0,
-      testR: parseFloat(testR) || 0,
-      testG: parseFloat(testG) || 0,
-      testB: parseFloat(testB) || 0,
+      refR: (parseFloat(refR) || 0) * rgbScale,
+      refG: (parseFloat(refG) || 0) * rgbScale,
+      refB: (parseFloat(refB) || 0) * rgbScale,
+      testR: (parseFloat(testR) || 0) * rgbScale,
+      testG: (parseFloat(testG) || 0) * rgbScale,
+      testB: (parseFloat(testB) || 0) * rgbScale,
       deltaE: currentResult.deltaE,
       method,
       lab1: currentResult.lab1,
@@ -1374,7 +1417,7 @@ function ErrorAssessmentTab() {
       interpretation: currentResult.interpretation,
     };
     setBatch((prev) => [...prev, entry]);
-  }, [currentResult, refR, refG, refB, testR, testG, testB, method]);
+  }, [currentResult, refR, refG, refB, testR, testG, testB, method, rgbScale]);
 
   const handleClearBatch = useCallback(() => {
     setBatch([]);
@@ -1421,19 +1464,33 @@ function ErrorAssessmentTab() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {/* Reference color */}
             <div className="space-y-2">
-              <Label className="text-sm font-medium">参考颜色 (RGB 0-1)</Label>
+              <div className="flex items-center gap-2">
+                <Label className="text-sm font-medium">参考颜色 (RGB)</Label>
+                <div className="flex rounded-md border overflow-hidden h-6">
+                  <button
+                    type="button"
+                    className={`px-2 text-[10px] font-medium transition-colors ${rgbRange === '0-1' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'}`}
+                    onClick={() => handleRangeSwitch('0-1')}
+                  >0-1</button>
+                  <button
+                    type="button"
+                    className={`px-2 text-[10px] font-medium transition-colors ${rgbRange === '0-255' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'}`}
+                    onClick={() => handleRangeSwitch('0-255')}
+                  >0-255</button>
+                </div>
+              </div>
               <div className="grid grid-cols-3 gap-2">
                 <div>
                   <Label className="text-[10px] text-muted-foreground">R</Label>
-                  <Input type="number" min="0" max="1" step="0.01" value={refR} onChange={(e) => setRefR(e.target.value)} className="h-8" />
+                  <Input type="number" min="0" max={rgbRange === '0-255' ? '255' : '1'} step={rgbRange === '0-255' ? '1' : '0.01'} value={refR} onChange={(e) => setRefR(e.target.value)} className="h-8" />
                 </div>
                 <div>
                   <Label className="text-[10px] text-muted-foreground">G</Label>
-                  <Input type="number" min="0" max="1" step="0.01" value={refG} onChange={(e) => setRefG(e.target.value)} className="h-8" />
+                  <Input type="number" min="0" max={rgbRange === '0-255' ? '255' : '1'} step={rgbRange === '0-255' ? '1' : '0.01'} value={refG} onChange={(e) => setRefG(e.target.value)} className="h-8" />
                 </div>
                 <div>
                   <Label className="text-[10px] text-muted-foreground">B</Label>
-                  <Input type="number" min="0" max="1" step="0.01" value={refB} onChange={(e) => setRefB(e.target.value)} className="h-8" />
+                  <Input type="number" min="0" max={rgbRange === '0-255' ? '255' : '1'} step={rgbRange === '0-255' ? '1' : '0.01'} value={refB} onChange={(e) => setRefB(e.target.value)} className="h-8" />
                 </div>
               </div>
             </div>
@@ -1441,7 +1498,7 @@ function ErrorAssessmentTab() {
             {/* Test color */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <Label className="text-sm font-medium">测试颜色 (RGB 0-1)</Label>
+                <Label className="text-sm font-medium">测试颜色 (RGB)</Label>
                 <label className="flex items-center gap-1.5 text-xs cursor-pointer">
                   <input
                     type="checkbox"
@@ -1455,15 +1512,15 @@ function ErrorAssessmentTab() {
               <div className="grid grid-cols-3 gap-2">
                 <div>
                   <Label className="text-[10px] text-muted-foreground">R</Label>
-                  <Input type="number" min="0" max="1" step="0.01" value={testR} onChange={(e) => setTestR(e.target.value)} className="h-8" disabled={autoConvert} />
+                  <Input type="number" min="0" max={rgbRange === '0-255' ? '255' : '1'} step={rgbRange === '0-255' ? '1' : '0.01'} value={testR} onChange={(e) => setTestR(e.target.value)} className="h-8" disabled={autoConvert} />
                 </div>
                 <div>
                   <Label className="text-[10px] text-muted-foreground">G</Label>
-                  <Input type="number" min="0" max="1" step="0.01" value={testG} onChange={(e) => setTestG(e.target.value)} className="h-8" disabled={autoConvert} />
+                  <Input type="number" min="0" max={rgbRange === '0-255' ? '255' : '1'} step={rgbRange === '0-255' ? '1' : '0.01'} value={testG} onChange={(e) => setTestG(e.target.value)} className="h-8" disabled={autoConvert} />
                 </div>
                 <div>
                   <Label className="text-[10px] text-muted-foreground">B</Label>
-                  <Input type="number" min="0" max="1" step="0.01" value={testB} onChange={(e) => setTestB(e.target.value)} className="h-8" disabled={autoConvert} />
+                  <Input type="number" min="0" max={rgbRange === '0-255' ? '255' : '1'} step={rgbRange === '0-255' ? '1' : '0.01'} value={testB} onChange={(e) => setTestB(e.target.value)} className="h-8" disabled={autoConvert} />
                 </div>
               </div>
               {autoConvert && (
