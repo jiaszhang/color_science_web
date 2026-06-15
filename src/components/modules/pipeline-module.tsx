@@ -21,7 +21,7 @@ import {
   rwToneCurve,
   type TMOParams,
 } from '@/lib/color-science/reference-white-tmo';
-import { loadImageRaw } from '@/lib/color-science/image-loader';
+import { loadImageRaw, loadImageUrlRaw } from '@/lib/color-science/image-loader';
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -286,7 +286,7 @@ function applyNode(node: PipelineNode, input: Vec3): Vec3 {
         downsampleFactor: number;
       };
       const tmoParams: TMOParams = {
-        sourceImagePeak: p.sourceImagePeak ?? 1000,
+        sourceImagePeak: p.sourceImagePeak ?? 2500,
         sourceImageReferenceWhite: p.sourceImageReferenceWhite ?? 203,
         mappingTargetReferenceWhite: p.mappingTargetReferenceWhite ?? 203,
         mappingTargetPeak: p.mappingTargetPeak ?? 1000,
@@ -332,10 +332,10 @@ function createDefaultNode(type: string): PipelineNode {
       return { ...base, name: '色调映射', params: { mode: 'reinhard' } };
     case 'ref-white-tmo':
       return { ...base, name: 'Ref.White TMO', params: {
-        sourceImagePeak: 1000,
+        sourceImagePeak: 2500,
         sourceImageReferenceWhite: 203,
         mappingTargetReferenceWhite: 203,
-        mappingTargetPeak: 1000,
+        mappingTargetPeak: 2500,
         sdrExposureAnchor: 1000 / 203,
         minimumSdrExposure: 0.5,
         offsetAnchor: 8 / 3,
@@ -695,7 +695,7 @@ function NodeConfigPanel({
 
           {editNode.type === 'ref-white-tmo' && (() => {
             const tmoParams: TMOParams = {
-              sourceImagePeak: (editNode.params.sourceImagePeak as number) ?? 1000,
+              sourceImagePeak: (editNode.params.sourceImagePeak as number) ?? 2500,
               sourceImageReferenceWhite: (editNode.params.sourceImageReferenceWhite as number) ?? 203,
               mappingTargetReferenceWhite: (editNode.params.mappingTargetReferenceWhite as number) ?? 203,
               mappingTargetPeak: (editNode.params.mappingTargetPeak as number) ?? 1000,
@@ -835,7 +835,7 @@ function NodeConfigPanel({
 
                         // Grid lines with tick labels
                         const numTicks = 5;
-                        ctx.strokeStyle = '#e5e7eb';
+                        ctx.strokeStyle = '#cbd5e1';
                         ctx.lineWidth = 0.5;
                         ctx.fillStyle = '#6b7280';
                         ctx.font = '9px sans-serif';
@@ -862,7 +862,7 @@ function NodeConfigPanel({
 
                         // x = y reference line — full diagonal from bottom-left to top-right corner
                         ctx.save();
-                        ctx.strokeStyle = '#d1d5db';
+                        ctx.strokeStyle = '#94a3b8';
                         ctx.lineWidth = 1;
                         ctx.setLineDash([4, 3]);
                         ctx.beginPath();
@@ -2236,7 +2236,7 @@ function BatchProcessTab() {
     srcUrl: string;
     dstUrl: string | null;
     status: 'pending' | 'processing' | 'done' | 'error';
-    file: File; // keep the original File for raw (no-ICC) loading
+    file?: File; // keep the original File for raw (no-ICC) loading
   }
   const [imageList, setImageList] = useState<ImageItem[]>([]);
   const [imageProcessing, setImageProcessing] = useState(false);
@@ -2246,50 +2246,46 @@ function BatchProcessTab() {
 
   const handleImageUpload = useCallback((files: FileList | null) => {
     if (!files || files.length === 0) return;
-    const newItems: ImageItem[] = [];
-    const loadPromises: Promise<void>[] = [];
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       if (!file.type.startsWith('image/')) continue;
       const itemId = `img_${Date.now()}_${i}_${Math.random().toString(36).substr(2, 5)}`;
-      // Start with a placeholder; will be updated once loadImageRaw resolves
-      newItems.push({
+
+      // Add placeholder immediately
+      const placeholder: ImageItem = {
         id: itemId,
         name: file.name,
         width: 0,
         height: 0,
-        srcUrl: '', // will be set from raw canvas
+        srcUrl: '',
         dstUrl: null,
         status: 'pending',
         file,
+      };
+      setImageList((prev) => [...prev, placeholder]);
+
+      // Load image without ICC conversion, then update the specific item
+      loadImageRaw(file).then((result) => {
+        setImageList((prev) =>
+          prev.map((item) =>
+            item.id === itemId
+              ? { ...item, width: result.width, height: result.height, srcUrl: result.dataUrl }
+              : item
+          )
+        );
+      }).catch(() => {
+        // Fallback: use blob URL if loadImageRaw fails
+        const fallbackUrl = URL.createObjectURL(file);
+        setImageList((prev) =>
+          prev.map((item) =>
+            item.id === itemId
+              ? { ...item, srcUrl: fallbackUrl }
+              : item
+          )
+        );
       });
-
-      // Load image without ICC conversion for correct preview
-      const idx = newItems.length - 1;
-      loadPromises.push(
-        loadImageRaw(file).then((result) => {
-          newItems[idx] = {
-            ...newItems[idx],
-            width: result.width,
-            height: result.height,
-            srcUrl: result.dataUrl,
-          };
-        }).catch(() => {
-          // Fallback: use blob URL if loadImageRaw fails
-          newItems[idx] = {
-            ...newItems[idx],
-            srcUrl: URL.createObjectURL(file),
-          };
-        })
-      );
     }
-
-    // Add items immediately with placeholder, then update when loaded
-    setImageList((prev) => [...prev, ...newItems]);
-    Promise.all(loadPromises).then(() => {
-      setImageList((prev) => [...prev]); // trigger re-render with updated data
-    });
   }, []);
 
   const handleProcessAllImages = useCallback(async () => {
@@ -2316,8 +2312,17 @@ function BatchProcessTab() {
 
       try {
         const item = updated[idx];
+
         // Load image without ICC color conversion to preserve raw pixel values
-        const rawResult = await loadImageRaw(item.file);
+        let rawResult;
+        if (item.file) {
+          rawResult = await loadImageRaw(item.file);
+        } else if (item.srcUrl) {
+          // Fallback for items without stored File (legacy data)
+          rawResult = await loadImageUrlRaw(item.srcUrl);
+        } else {
+          throw new Error('No image source available');
+        }
         const origW = rawResult.width;
         const origH = rawResult.height;
 
@@ -2612,8 +2617,8 @@ function BatchProcessTab() {
             >
               <Upload className="h-8 w-8 mx-auto text-muted-foreground/40 mb-2" />
               <p className="text-sm font-medium">拖拽或点击上传图片（支持多选）</p>
-              <p className="text-xs text-muted-foreground mt-1">支持 PNG / JPEG / WebP，可一次选择多张</p>
-              <input ref={imageInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple className="hidden" onChange={(e) => { handleImageUpload(e.target.files); e.target.value = ''; }} />
+              <p className="text-xs text-muted-foreground mt-1">支持 PNG / JPEG / WebP / TIFF 等，可一次选择多张</p>
+              <input ref={imageInputRef} type="file" accept="image/*" multiple className="hidden" onChange={(e) => { handleImageUpload(e.target.files); e.target.value = ''; }} />
             </div>
 
             {/* Image list */}
