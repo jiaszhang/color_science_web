@@ -1,0 +1,899 @@
+     1→/**
+     2→ * 3D LUT (Look-Up Table) operations
+     3→ * Supports creation, application, import/export (.cube format), interpolation
+     4→ */
+     5→
+     6→import { type Vec3, clampVec3 } from './matrices';
+     7→import { convertColorSpace, type TransferFunctionName } from './transform';
+     8→
+     9→export interface LUT3D {
+    10→  name: string;
+    11→  size: number; // Grid size per axis (e.g., 33, 65)
+    12→  data: Float32Array; // Flat array: [R0,G0,B0, R1,G1,B1, ...]
+    13→  inputRange: { min: number; max: number };
+    14→  outputRange: { min: number; max: number };
+    15→  title?: string;
+    16→  srcGamut?: string;
+    17→  dstGamut?: string;
+    18→}
+    19→
+    20→/**
+    21→ * Create an empty 3D LUT (identity)
+    22→ */
+    23→export function createLUT3D(size: number, name = 'Identity LUT'): LUT3D {
+    24→  const totalEntries = size * size * size;
+    25→  const data = new Float32Array(totalEntries * 3);
+    26→
+    27→  let idx = 0;
+    28→  for (let b = 0; b < size; b++) {
+    29→    for (let g = 0; g < size; g++) {
+    30→      for (let r = 0; r < size; r++) {
+    31→        const rv = r / (size - 1);
+    32→        const gv = g / (size - 1);
+    33→        const bv = b / (size - 1);
+    34→        data[idx++] = rv;
+    35→        data[idx++] = gv;
+    36→        data[idx++] = bv;
+    37→      }
+    38→    }
+    39→  }
+    40→
+    41→  return {
+    42→    name,
+    43→    size,
+    44→    data,
+    45→    inputRange: { min: 0, max: 1 },
+    46→    outputRange: { min: 0, max: 1 },
+    47→  };
+    48→}
+    49→
+    50→/**
+    51→ * Create a 3D LUT from a color space conversion function
+    52→ */
+    53→export function createLUT3DFromTransform(
+    54→  size: number,
+    55→  name: string,
+    56→  transform: (r: number, g: number, b: number) => Vec3,
+    57→  srcGamut?: string,
+    58→  dstGamut?: string
+    59→): LUT3D {
+    60→  const totalEntries = size * size * size;
+    61→  const data = new Float32Array(totalEntries * 3);
+    62→
+    63→  let idx = 0;
+    64→  for (let b = 0; b < size; b++) {
+    65→    for (let g = 0; g < size; g++) {
+    66→      for (let r = 0; r < size; r++) {
+    67→        const rv = r / (size - 1);
+    68→        const gv = g / (size - 1);
+    69→        const bv = b / (size - 1);
+    70→        const [outR, outG, outB] = transform(rv, gv, bv);
+    71→        data[idx++] = outR;
+    72→        data[idx++] = outG;
+    73→        data[idx++] = outB;
+    74→      }
+    75→    }
+    76→  }
+    77→
+    78→  return {
+    79→    name,
+    80→    size,
+    81→    data,
+    82→    inputRange: { min: 0, max: 1 },
+    83→    outputRange: { min: 0, max: 1 },
+    84→    srcGamut,
+    85→    dstGamut,
+    86→  };
+    87→}
+    88→
+    89→/**
+    90→ * Create a color space conversion LUT
+    91→ */
+    92→export function createColorSpaceLUT(
+    93→  size: number,
+    94→  srcGamut: string,
+    95→  srcTF: TransferFunctionName,
+    96→  dstGamut: string,
+    97→  dstTF: TransferFunctionName
+    98→): LUT3D {
+    99→  const name = `${srcGamut} → ${dstGamut}`;
+   100→  return createLUT3DFromTransform(size, name, (r, g, b) => {
+   101→    return convertColorSpace(r, g, b, srcGamut, srcTF, dstGamut, dstTF);
+   102→  }, srcGamut, dstGamut);
+   103→}
+   104→
+   105→/**
+   106→ * Trilinear interpolation on a 3D LUT
+   107→ */
+   108→export function applyLUT3D(lut: LUT3D, r: number, g: number, b: number): Vec3 {
+   109→  const size = lut.size;
+   110→  const { min, max } = lut.inputRange;
+   111→  const range = max - min;
+   112→
+   113→  // Normalize input to grid coordinates
+   114→  const nr = (clampVec3([r, g, b], min, max)[0] - min) / range;
+   115→  const ng = (clampVec3([r, g, b], min, max)[1] - min) / range;
+   116→  const nb = (clampVec3([r, g, b], min, max)[2] - min) / range;
+   117→
+   118→  // Scale to grid indices
+   119→  const gridR = nr * (size - 1);
+   120→  const gridG = ng * (size - 1);
+   121→  const gridB = nb * (size - 1);
+   122→
+   123→  // Floor indices
+   124→  const r0 = Math.floor(gridR);
+   125→  const g0 = Math.floor(gridG);
+   126→  const b0 = Math.floor(gridB);
+   127→
+   128→  // Fractional parts
+   129→  const fr = gridR - r0;
+   130→  const fg = gridG - g0;
+   131→  const fb = gridB - b0;
+   132→
+   133→  // Clamp upper indices
+   134→  const r1 = Math.min(r0 + 1, size - 1);
+   135→  const g1 = Math.min(g0 + 1, size - 1);
+   136→  const b1 = Math.min(b0 + 1, size - 1);
+   137→
+   138→  // Helper to get LUT value at grid point
+   139→  const getVal = (ri: number, gi: number, bi: number, ch: number): number => {
+   140→    const idx = (bi * size * size + gi * size + ri) * 3 + ch;
+   141→    return lut.data[idx];
+   142→  };
+   143→
+   144→  // Trilinear interpolation
+   145→  const result: Vec3 = [0, 0, 0];
+   146→  for (let ch = 0; ch < 3; ch++) {
+   147→    const c000 = getVal(r0, g0, b0, ch);
+   148→    const c100 = getVal(r1, g0, b0, ch);
+   149→    const c010 = getVal(r0, g1, b0, ch);
+   150→    const c110 = getVal(r1, g1, b0, ch);
+   151→    const c001 = getVal(r0, g0, b1, ch);
+   152→    const c101 = getVal(r1, g0, b1, ch);
+   153→    const c011 = getVal(r0, g1, b1, ch);
+   154→    const c111 = getVal(r1, g1, b1, ch);
+   155→
+   156→    const c00 = c000 * (1 - fr) + c100 * fr;
+   157→    const c10 = c010 * (1 - fr) + c110 * fr;
+   158→    const c01 = c001 * (1 - fr) + c101 * fr;
+   159→    const c11 = c011 * (1 - fr) + c111 * fr;
+   160→
+   161→    const c0 = c00 * (1 - fg) + c10 * fg;
+   162→    const c1 = c01 * (1 - fg) + c11 * fg;
+   163→
+   164→    result[ch] = c0 * (1 - fb) + c1 * fb;
+   165→  }
+   166→
+   167→  return result;
+   168→}
+   169→
+   170→/**
+   171→ * Combine (chain) two 3D LUTs: first lut1, then lut2
+   172→ * Creates a new identity-sized LUT with combined transform
+   173→ */
+   174→export function chainLUTs(lut1: LUT3D, lut2: LUT3D, size = 33): LUT3D {
+   175→  return createLUT3DFromTransform(
+   176→    size,
+   177→    `${lut1.name} → ${lut2.name}`,
+   178→    (r, g, b) => {
+   179→      const [r1, g1, b1] = applyLUT3D(lut1, r, g, b);
+   180→      return applyLUT3D(lut2, r1, g1, b1);
+   181→    }
+   182→  );
+   183→}
+   184→
+   185→/**
+   186→ * Export LUT to .cube format string
+   187→ * @param lut - The LUT to export
+   188→ * @param channelOrder - Channel order for data output: 'rgb' (R outer, G middle, B inner) or 'bgr' (B outer, G middle, R inner, standard .cube)
+   189→ */
+   190→export function exportLUTToCube(lut: LUT3D, channelOrder: 'rgb' | 'bgr' = 'bgr'): string {
+   191→  const lines: string[] = [];
+   192→
+   193→  // Header
+   194→  lines.push(`# Created by Color Pipeline`);
+   195→  lines.push(`TITLE "${lut.name}"`);
+   196→  if (lut.srcGamut) lines.push(`# Source: ${lut.srcGamut}`);
+   197→  if (lut.dstGamut) lines.push(`# Target: ${lut.dstGamut}`);
+   198→  lines.push(`DOMAIN_MIN ${lut.inputRange.min} ${lut.inputRange.min} ${lut.inputRange.min}`);
+   199→  lines.push(`DOMAIN_MAX ${lut.inputRange.max} ${lut.inputRange.max} ${lut.inputRange.max}`);
+   200→  lines.push(`LUT_3D_SIZE ${lut.size}`);
+   201→  lines.push('');
+   202→
+   203→  // Data
+   204→  const size = lut.size;
+   205→  if (channelOrder === 'bgr') {
+   206→    // Standard .cube order: B outer, G middle, R inner
+   207→    for (let b = 0; b < size; b++) {
+   208→      for (let g = 0; g < size; g++) {
+   209→        for (let r = 0; r < size; r++) {
+   210→          const idx = (b * size * size + g * size + r) * 3;
+   211→          const rv = clampVec3([lut.data[idx], lut.data[idx + 1], lut.data[idx + 2]], 0, 1);
+   212→          lines.push(`${rv[0].toFixed(6)} ${rv[1].toFixed(6)} ${rv[2].toFixed(6)}`);
+   213→        }
+   214→      }
+   215→    }
+   216→  } else {
+   217→    // RGB order: R outer (slowest), G middle, B inner (fastest)
+   218→    for (let r = 0; r < size; r++) {
+   219→      for (let g = 0; g < size; g++) {
+   220→        for (let b = 0; b < size; b++) {
+   221→          const idx = (b * size * size + g * size + r) * 3;
+   222→          const rv = clampVec3([lut.data[idx], lut.data[idx + 1], lut.data[idx + 2]], 0, 1);
+   223→          lines.push(`${rv[0].toFixed(6)} ${rv[1].toFixed(6)} ${rv[2].toFixed(6)}`);
+   224→        }
+   225→      }
+   226→    }
+   227→  }
+   228→
+   229→  return lines.join('\n');
+   230→}
+   231→
+   232→/**
+   233→ * Export LUT to CSV format string
+   234→ * Each line contains 3 comma-separated values (float 0-1 or integer based on bitDepth)
+   235→ * @param lut - The LUT to export
+   236→ * @param options - Export options: channel order and bit depth
+   237→ */
+   238→export function exportLUTToCSV(
+   239→  lut: LUT3D,
+   240→  options: {
+   241→    channelOrder?: 'rgb' | 'bgr';
+   242→    bitDepth?: number; // If provided, values are integers in range [0, 2^bitDepth - 1]; if omitted, float 0-1
+   243→  } = {}
+   244→): string {
+   245→  const { channelOrder = 'bgr', bitDepth } = options;
+   246→  const size = lut.size;
+   247→  const totalEntries = size * size * size;
+   248→  const lines: string[] = [];
+   249→  const maxVal = bitDepth ? Math.pow(2, bitDepth) - 1 : 0;
+   250→
+   251→  const formatVal = (v: number): string => {
+   252→    const clamped = Math.max(0, Math.min(1, v));
+   253→    if (bitDepth) {
+   254→      return String(Math.round(clamped * maxVal));
+   255→    }
+   256→    return clamped.toFixed(6);
+   257→  };
+   258→
+   259→  if (channelOrder === 'bgr') {
+   260→    // B outer, G middle, R inner (same as standard .cube layout)
+   261→    for (let b = 0; b < size; b++) {
+   262→      for (let g = 0; g < size; g++) {
+   263→        for (let r = 0; r < size; r++) {
+   264→          const idx = (b * size * size + g * size + r) * 3;
+   265→          const rv = clampVec3([lut.data[idx], lut.data[idx + 1], lut.data[idx + 2]], 0, 1);
+   266→          lines.push(`${formatVal(rv[0])},${formatVal(rv[1])},${formatVal(rv[2])}`);
+   267→        }
+   268→      }
+   269→    }
+   270→  } else {
+   271→    // R outer (slowest), G middle, B inner (fastest)
+   272→    for (let r = 0; r < size; r++) {
+   273→      for (let g = 0; g < size; g++) {
+   274→        for (let b = 0; b < size; b++) {
+   275→          const idx = (b * size * size + g * size + r) * 3;
+   276→          const rv = clampVec3([lut.data[idx], lut.data[idx + 1], lut.data[idx + 2]], 0, 1);
+   277→          lines.push(`${formatVal(rv[0])},${formatVal(rv[1])},${formatVal(rv[2])}`);
+   278→        }
+   279→      }
+   280→    }
+   281→  }
+   282→
+   283→  return lines.join('\n');
+   284→}
+   285→
+   286→/**
+   287→ * CSV 3DLUT import options
+   288→ */
+   289→export interface CSVLutOptions {
+   290→  /** Bit depth of the integer values in the CSV (8, 10, 12, 14, 16, etc.) */
+   291→  bitDepth: number;
+   292→  /**
+   293→   * Data ordering of the CSV rows:
+   294→   * - 'rgb': RGB increment — R changes slowest (outer), G middle, B fastest (inner)
+   295→   *          line_index = R * size² + G * size + B
+   296→   * - 'bgr': BGR increment — B changes slowest (outer), G middle, R fastest (inner)
+   297→   *          line_index = B * size² + G * size + R
+   298→   *          (identical to .cube format layout, no reorder needed)
+   299→   */
+   300→  order: 'rgb' | 'bgr';
+   301→  /** Optional LUT name */
+   302→  name?: string;
+   303→}
+   304→
+   305→/**
+   306→ * Parse a CSV format 3D LUT file
+   307→ *
+   308→ * CSV format: each line has 3 comma-separated integer RGB values.
+   309→ * The grid size is auto-detected as the cube root of the line count.
+   310→ *
+   311→ * Reorder logic for 'rgb' order (matching GMP3dlutOutputReorder):
+   312→ *   Source (RGB increment): src[lineIdx] corresponds to grid point (R, G, B)
+   313→ *     where lineIdx = R * size² + G * size + B
+   314→ *   Destination (internal / .cube format): dst[(B * size² + G * size + R)] = src[lineIdx]
+   315→ *     i.e., B outer, G middle, R inner
+   316→ *
+   317→ * This is equivalent to the C reorder function:
+   318→ *   for (b) for (g=size;g>0;g--) for (r=1;r<=size;r++)
+   319→ *     index = size²*r - size*g + b    →  R*size² + G*size + B  (source)
+   320→ *     output[i++] = source[index]      →  B outer, G middle, R inner (dest)
+   321→ *
+   322→ * The internal format matches applyLUT3D's lookup:
+   323→ *   getVal(ri, gi, bi, ch) → data[(bi * size² + gi * size + ri) * 3 + ch]
+   324→ */
+   325→export function parseCSVLut(content: string, options: CSVLutOptions): LUT3D {
+   326→  const { bitDepth, order, name: lutName } = options;
+   327→  const maxVal = Math.pow(2, bitDepth) - 1;
+   328→
+   329→  // Split lines and parse
+   330→  const lines = content
+   331→    .split('\n')
+   332→    .map(l => l.trim())
+   333→    .filter(l => l.length > 0);
+   334→
+   335→  if (lines.length === 0) {
+   336→    throw new Error('CSV 文件为空');
+   337→  }
+   338→
+   339→  // Auto-detect grid size from line count
+   340→  const totalEntries = lines.length;
+   341→  const size = Math.round(Math.cbrt(totalEntries));
+   342→
+   343→  if (Math.pow(size, 3) !== totalEntries) {
+   344→    throw new Error(
+   345→      `行数 ${totalEntries} 不是完全立方数。最近的立方数: ${size}³ = ${Math.pow(size, 3)}`
+   346→    );
+   347→  }
+   348→
+   349→  if (size < 2 || size > 256) {
+   350→    throw new Error(`网格大小 ${size} 不在有效范围 (2-256) 内`);
+   351→  }
+   352→
+   353→  // Parse all lines into flat arrays (normalized 0-1)
+   354→  const rawR = new Float32Array(totalEntries);
+   355→  const rawG = new Float32Array(totalEntries);
+   356→  const rawB = new Float32Array(totalEntries);
+   357→
+   358→  for (let i = 0; i < totalEntries; i++) {
+   359→    const parts = lines[i].split(',');
+   360→    if (parts.length < 3) {
+   361→      throw new Error(`第 ${i + 1} 行格式错误: 期望 3 个逗号分隔的值，实际 ${parts.length} 个`);
+   362→    }
+   363→    const rv = parseFloat(parts[0].trim());
+   364→    const gv = parseFloat(parts[1].trim());
+   365→    const bv = parseFloat(parts[2].trim());
+   366→    if (isNaN(rv) || isNaN(gv) || isNaN(bv)) {
+   367→      throw new Error(`第 ${i + 1} 行包含非数值`);
+   368→    }
+   369→    rawR[i] = rv / maxVal;
+   370→    rawG[i] = gv / maxVal;
+   371→    rawB[i] = bv / maxVal;
+   372→  }
+   373→
+   374→  // Build LUT data in internal format: idx = (b * size * size + g * size + r) * 3
+   375→  // This layout matches applyLUT3D's getVal: data[(bi*size² + gi*size + ri)*3 + ch]
+   376→  const data = new Float32Array(totalEntries * 3);
+   377→
+   378→  for (let lineIdx = 0; lineIdx < totalEntries; lineIdx++) {
+   379→    let r: number, g: number, b: number;
+   380→
+   381→    if (order === 'rgb') {
+   382→      // RGB increment: source lineIdx = R * size² + G * size + B
+   383→      // → R outer (slowest), G middle, B inner (fastest)
+   384→      r = Math.floor(lineIdx / (size * size));
+   385→      g = Math.floor((lineIdx % (size * size)) / size);
+   386→      b = lineIdx % size;
+   387→      // Reorder to internal format: dstIdx = B * size² + G * size + R
+   388→      // (B outer, G middle, R inner — matching .cube / applyLUT3D layout)
+   389→    } else {
+   390→      // BGR increment: source lineIdx = B * size² + G * size + R
+   391→      // → B outer, G middle, R inner (already matches internal format, no reorder)
+   392→      b = Math.floor(lineIdx / (size * size));
+   393→      g = Math.floor((lineIdx % (size * size)) / size);
+   394→      r = lineIdx % size;
+   395→    }
+   396→
+   397→    const dstIdx = (b * size * size + g * size + r) * 3;
+   398→    data[dstIdx] = rawR[lineIdx];
+   399→    data[dstIdx + 1] = rawG[lineIdx];
+   400→    data[dstIdx + 2] = rawB[lineIdx];
+   401→  }
+   402→
+   403→  return {
+   404→    name: lutName || `CSV LUT ${size}³`,
+   405→    size,
+   406→    data,
+   407→    inputRange: { min: 0, max: 1 },
+   408→    outputRange: { min: 0, max: 1 },
+   409→  };
+   410→}
+   411→
+   412→/**
+   413→ * Parse a .cube format LUT file
+   414→ */
+   415→export function parseCubeFile(content: string, dataOrder: 'bgr' | 'rgb' = 'bgr'): LUT3D {
+   416→  const lines = content.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+   417→
+   418→  let size = 33;
+   419→  let name = 'Imported LUT';
+   420→  let domainMin = [0, 0, 0];
+   421→  let domainMax = [1, 1, 1];
+   422→  let dataStartIdx = 0;
+   423→
+   424→  // Parse header
+   425→  for (let i = 0; i < lines.length; i++) {
+   426→    const line = lines[i];
+   427→    if (line.toUpperCase().startsWith('TITLE')) {
+   428→      name = line.match(/"([^"]+)"/)?.[1] || name;
+   429→    } else if (line.toUpperCase().startsWith('LUT_3D_SIZE')) {
+   430→      size = parseInt(line.split(/\s+/)[1]);
+   431→    } else if (line.toUpperCase().startsWith('DOMAIN_MIN')) {
+   432→      domainMin = line.split(/\s+/).slice(1).map(Number);
+   433→    } else if (line.toUpperCase().startsWith('DOMAIN_MAX')) {
+   434→      domainMax = line.split(/\s+/).slice(1).map(Number);
+   435→    } else {
+   436→      // Check if this is the start of data (3 numbers)
+   437→      const parts = line.split(/\s+/);
+   438→      if (parts.length === 3 && parts.every(p => !isNaN(Number(p)))) {
+   439→        dataStartIdx = i;
+   440→        break;
+   441→      }
+   442→    }
+   443→  }
+   444→
+   445→  // Parse raw data lines into separate arrays first
+   446→  const totalEntries = size * size * size;
+   447→  const rawR = new Float32Array(totalEntries);
+   448→  const rawG = new Float32Array(totalEntries);
+   449→  const rawB = new Float32Array(totalEntries);
+   450→  let dataIdx = 0;
+   451→
+   452→  for (let i = dataStartIdx; i < lines.length && dataIdx < totalEntries; i++) {
+   453→    const parts = lines[i].split(/\s+/);
+   454→    if (parts.length >= 3) {
+   455→      rawR[dataIdx] = parseFloat(parts[0]);
+   456→      rawG[dataIdx] = parseFloat(parts[1]);
+   457→      rawB[dataIdx] = parseFloat(parts[2]);
+   458→      dataIdx++;
+   459→    }
+   460→  }
+   461→
+   462→  // Build internal data array: index = (b * size² + g * size + r) * 3
+   463→  const data = new Float32Array(totalEntries * 3);
+   464→
+   465→  if (dataOrder === 'bgr') {
+   466→    // Standard .cube: B outer, G middle, R inner — already matches internal layout
+   467→    for (let lineIdx = 0; lineIdx < totalEntries; lineIdx++) {
+   468→      const idx = lineIdx * 3;
+   469→      data[idx] = rawR[lineIdx];
+   470→      data[idx + 1] = rawG[lineIdx];
+   471→      data[idx + 2] = rawB[lineIdx];
+   472→    }
+   473→  } else {
+   474→    // RGB order: R outer (slowest), G middle, B inner (fastest)
+   475→    // Source lineIdx = R * size² + G * size + B
+   476→    // Reorder to internal: dstIdx = B * size² + G * size + R
+   477→    for (let lineIdx = 0; lineIdx < totalEntries; lineIdx++) {
+   478→      const r = Math.floor(lineIdx / (size * size));
+   479→      const g = Math.floor((lineIdx % (size * size)) / size);
+   480→      const b = lineIdx % size;
+   481→      const dstIdx = (b * size * size + g * size + r) * 3;
+   482→      data[dstIdx] = rawR[lineIdx];
+   483→      data[dstIdx + 1] = rawG[lineIdx];
+   484→      data[dstIdx + 2] = rawB[lineIdx];
+   485→    }
+   486→  }
+   487→
+   488→  return {
+   489→    name,
+   490→    size,
+   491→    data,
+   492→    inputRange: { min: domainMin[0], max: domainMax[0] },
+   493→    outputRange: { min: 0, max: 1 },
+   494→  };
+   495→}
+   496→
+   497→/**
+   498→ * Apply LUT to ImageData (canvas pixel data)
+   499→ */
+   500→export function applyLUTToImageData(lut: LUT3D, imageData: ImageData): ImageData {
+   501→  const result = new ImageData(
+   502→    new Uint8ClampedArray(imageData.data),
+   503→    imageData.width,
+   504→    imageData.height
+   505→  );
+   506→
+   507→  for (let i = 0; i < imageData.data.length; i += 4) {
+   508→    const r = imageData.data[i] / 255;
+   509→    const g = imageData.data[i + 1] / 255;
+   510→    const b = imageData.data[i + 2] / 255;
+   511→
+   512→    const [or, og, ob] = applyLUT3D(lut, r, g, b);
+   513→
+   514→    result.data[i] = Math.round(clampVec3([or, og, ob], 0, 1)[0] * 255);
+   515→    result.data[i + 1] = Math.round(clampVec3([or, og, ob], 0, 1)[1] * 255);
+   516→    result.data[i + 2] = Math.round(clampVec3([or, og, ob], 0, 1)[2] * 255);
+   517→    result.data[i + 3] = imageData.data[i + 3]; // Alpha
+   518→  }
+   519→
+   520→  return result;
+   521→}
+   522→
+   523→/**
+   524→ * Upsample a 3D LUT to a larger grid size using trilinear interpolation
+   525→ */
+   526→export function upsampleLUT(lut: LUT3D, newSize: number): LUT3D {
+   527→  return createLUT3DFromTransform(
+   528→    newSize,
+   529→    `${lut.name} [${newSize}³ 上采样]`,
+   530→    (r, g, b) => applyLUT3D(lut, r, g, b),
+   531→    lut.srcGamut,
+   532→    lut.dstGamut,
+   533→  );
+   534→}
+   535→
+   536→/**
+   537→ * Adjust the output gamut/transfer-function of an existing LUT.
+   538→ * For each entry, the output RGB is re-interpreted from lut.dstGamut (or 'sRGB')
+   539→ * and converted into the requested newDstGamut + newDstTF.
+   540→ */
+   541→export function adjustLUTGamut(
+   542→  lut: LUT3D,
+   543→  newDstGamut: string,
+   544→  newDstTF: TransferFunctionName,
+   545→): LUT3D {
+   546→  const srcGamut = lut.dstGamut || 'sRGB';
+   547→  const srcTF: TransferFunctionName = 'sRGB';
+   548→  const size = lut.size;
+   549→  const totalEntries = size * size * size;
+   550→  const data = new Float32Array(totalEntries * 3);
+   551→
+   552→  for (let b = 0; b < size; b++) {
+   553→    for (let g = 0; g < size; g++) {
+   554→      for (let r = 0; r < size; r++) {
+   555→        const idx = (b * size * size + g * size + r) * 3;
+   556→        const or = lut.data[idx];
+   557→        const og = lut.data[idx + 1];
+   558→        const ob = lut.data[idx + 2];
+   559→        const [nr, ng, nb] = convertColorSpace(or, og, ob, srcGamut, srcTF, newDstGamut, newDstTF);
+   560→        data[idx] = nr;
+   561→        data[idx + 1] = ng;
+   562→        data[idx + 2] = nb;
+   563→      }
+   564→    }
+   565→  }
+   566→
+   567→  return {
+   568→    name: `${lut.name} → ${newDstGamut}`,
+   569→    size,
+   570→    data,
+   571→    inputRange: { min: 0, max: 1 },
+   572→    outputRange: { min: 0, max: 1 },
+   573→    srcGamut: lut.srcGamut,
+   574→    dstGamut: newDstGamut,
+   575→  };
+   576→}
+   577→
+   578→/**
+   579→ * Get a 2D slice of the 3D LUT for visualization
+   580→ * @param lut - The 3D LUT
+   581→ * @param axis - Which axis to fix (0=R, 1=G, 2=B)
+   582→ * @param slicePos - Position on the fixed axis (0 to size-1)
+   583→ */
+   584→export function getLUTSlice(
+   585→  lut: LUT3D,
+   586→  axis: 0 | 1 | 2,
+   587→  slicePos: number
+   588→): { grid: number; index: number; rgb: Vec3 }[][] {
+   589→  const size = lut.size;
+   590→  const slice = Math.max(0, Math.min(size - 1, slicePos));
+   591→  const grid: { grid: number; index: number; rgb: Vec3 }[][] = [];
+   592→
+   593→  for (let j = 0; j < size; j++) {
+   594→    const row: { grid: number; index: number; rgb: Vec3 }[] = [];
+   595→    for (let i = 0; i < size; i++) {
+   596→      let ri, gi, bi;
+   597→      if (axis === 0) { ri = slice; gi = i; bi = j; }
+   598→      else if (axis === 1) { ri = i; gi = slice; bi = j; }
+   599→      else { ri = i; gi = j; bi = slice; }
+   600→
+   601→      const idx = (bi * size * size + gi * size + ri) * 3;
+   602→      row.push({
+   603→        grid: size,
+   604→        index: idx / 3,
+   605→        rgb: [lut.data[idx], lut.data[idx + 1], lut.data[idx + 2]],
+   606→      });
+   607→    }
+   608→    grid.push(row);
+   609→  }
+   610→
+   611→  return grid;
+   612→}
+   613→
+   614→// ============ LUT Extraction Functions ============
+   615→
+   616→/**
+   617→ * Extract 3DLUT from sparse color point pairs using inverse distance weighting interpolation
+   618→ * @param colorPairs - Array of {input: [r,g,b], output: [r,g,b]} pairs (normalized 0-1)
+   619→ * @param gridSize - LUT grid size (e.g., 17, 33)
+   620→ * @param idwPower - Inverse distance weighting power parameter (default 2)
+   621→ */
+   622→export function extractLUTFromColorPairs(
+   623→  colorPairs: Array<{ input: [number, number, number]; output: [number, number, number] }>,
+   624→  gridSize: number,
+   625→  idwPower: number = 2
+   626→): LUT3D {
+   627→  const totalEntries = gridSize * gridSize * gridSize;
+   628→  const data = new Float32Array(totalEntries * 3);
+   629→
+   630→  if (colorPairs.length === 0) {
+   631→    // Return identity LUT if no pairs
+   632→    return createLUT3D(gridSize, 'Identity LUT (no data)');
+   633→  }
+   634→
+   635→  // Pre-compute grid point coordinates
+   636→  const step = 1 / (gridSize - 1);
+   637→
+   638→  // Search radius: cover a reasonable portion of the color space
+   639→  // Use a radius of 2 grid steps for IDW neighbor search
+   640→  const searchRadius = step * 2.5;
+   641→
+   642→  for (let bi = 0; bi < gridSize; bi++) {
+   643→    for (let gi = 0; gi < gridSize; gi++) {
+   644→      for (let ri = 0; ri < gridSize; ri++) {
+   645→        const gr = ri * step;
+   646→        const gg = gi * step;
+   647→        const gb = bi * step;
+   648→        const idx = (bi * gridSize * gridSize + gi * gridSize + ri) * 3;
+   649→
+   650→        // Find nearby samples and compute IDW
+   651→        let weightSum = 0;
+   652→        let outR = 0;
+   653→        let outG = 0;
+   654→        let outB = 0;
+   655→        let nearestDist = Infinity;
+   656→
+   657→        for (const pair of colorPairs) {
+   658→          const dr = gr - pair.input[0];
+   659→          const dg = gg - pair.input[1];
+   660→          const db = gb - pair.input[2];
+   661→          const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+   662→
+   663→          if (dist < nearestDist) nearestDist = dist;
+   664→
+   665→          if (dist < searchRadius) {
+   666→            // Use a small epsilon to avoid division by zero for exact matches
+   667→            const effectiveDist = Math.max(dist, 1e-10);
+   668→            const weight = 1 / Math.pow(effectiveDist, idwPower);
+   669→            weightSum += weight;
+   670→            outR += weight * pair.output[0];
+   671→            outG += weight * pair.output[1];
+   672→            outB += weight * pair.output[2];
+   673→          }
+   674→        }
+   675→
+   676→        if (weightSum > 0) {
+   677→          // IDW interpolation result
+   678→          data[idx] = clampVal(outR / weightSum);
+   679→          data[idx + 1] = clampVal(outG / weightSum);
+   680→          data[idx + 2] = clampVal(outB / weightSum);
+   681→        } else {
+   682→          // No nearby samples: use nearest neighbor, or fall back to identity
+   683→          // Find the nearest sample point
+   684→          let minDist = Infinity;
+   685→          let nearestOut: [number, number, number] = [gr, gg, gb];
+   686→          for (const pair of colorPairs) {
+   687→            const dr = gr - pair.input[0];
+   688→            const dg = gg - pair.input[1];
+   689→            const db = gb - pair.input[2];
+   690→            const dist = dr * dr + dg * dg + db * db;
+   691→            if (dist < minDist) {
+   692→              minDist = dist;
+   693→              nearestOut = pair.output;
+   694→            }
+   695→          }
+   696→          // Blend between nearest sample and identity based on distance
+   697→          const blendDist = Math.sqrt(minDist);
+   698→          const maxBlendDist = step * 4; // Beyond this, use pure identity
+   699→          const blend = Math.max(0, 1 - blendDist / maxBlendDist);
+   700→          data[idx] = clampVal(nearestOut[0] * blend + gr * (1 - blend));
+   701→          data[idx + 1] = clampVal(nearestOut[1] * blend + gg * (1 - blend));
+   702→          data[idx + 2] = clampVal(nearestOut[2] * blend + gb * (1 - blend));
+   703→        }
+   704→      }
+   705→    }
+   706→  }
+   707→
+   708→  return {
+   709→    name: `提取 LUT ${gridSize}³`,
+   710→    size: gridSize,
+   711→    data,
+   712→    inputRange: { min: 0, max: 1 },
+   713→    outputRange: { min: 0, max: 1 },
+   714→  };
+   715→}
+   716→
+   717→function clampVal(v: number): number {
+   718→  return Math.max(0, Math.min(1, v));
+   719→}
+   720→
+   721→/**
+   722→ * Generate calibration image data for a given grid size
+   723→ * Returns the RGB values and their grid positions for creating a calibration image
+   724→ * @param gridSize - LUT grid size
+   725→ */
+   726→export function generateCalibrationImageData(gridSize: number): {
+   727→  colors: Array<{ r: number; g: number; b: number; gridR: number; gridG: number; gridB: number }>;
+   728→  gridSize: number;
+   729→  patchSize: number;
+   730→  imageWidth: number;
+   731→  imageHeight: number;
+   732→} {
+   733→  const totalColors = gridSize * gridSize * gridSize;
+   734→  const patchSize = gridSize <= 17 ? 8 : gridSize <= 33 ? 4 : 2;
+   735→  const gap = 1; // 1px border between patches
+   736→
+   737→  // Calculate grid layout
+   738→  const cols = Math.ceil(Math.sqrt(totalColors));
+   739→  const rows = Math.ceil(totalColors / cols);
+   740→
+   741→  const imageWidth = cols * (patchSize + gap) + gap;
+   742→  const imageHeight = rows * (patchSize + gap) + gap;
+   743→
+   744→  // Generate all color points in LUT order (B outer, G middle, R inner)
+   745→  const colors: Array<{ r: number; g: number; b: number; gridR: number; gridG: number; gridB: number }> = [];
+   746→  for (let bi = 0; bi < gridSize; bi++) {
+   747→    for (let gi = 0; gi < gridSize; gi++) {
+   748→      for (let ri = 0; ri < gridSize; ri++) {
+   749→        colors.push({
+   750→          r: ri / (gridSize - 1),
+   751→          g: gi / (gridSize - 1),
+   752→          b: bi / (gridSize - 1),
+   753→          gridR: ri,
+   754→          gridG: gi,
+   755→          gridB: bi,
+   756→        });
+   757→      }
+   758→    }
+   759→  }
+   760→
+   761→  return { colors, gridSize, patchSize, imageWidth, imageHeight };
+   762→}
+   763→
+   764→/**
+   765→ * Render calibration image to a canvas and return as data URL
+   766→ * This runs client-side only (uses document/canvas)
+   767→ */
+   768→export function renderCalibrationImage(
+   769→  calibData: ReturnType<typeof generateCalibrationImageData>
+   770→): string {
+   771→  const { colors, patchSize, imageWidth, imageHeight } = calibData;
+   772→  const gap = 1;
+   773→  const cols = Math.ceil(Math.sqrt(colors.length));
+   774→
+   775→  // Create offscreen canvas
+   776→  const canvas = document.createElement('canvas');
+   777→  canvas.width = imageWidth;
+   778→  canvas.height = imageHeight;
+   779→  const ctx = canvas.getContext('2d')!;
+   780→
+   781→  // Fill background with neutral gray
+   782→  ctx.fillStyle = '#808080';
+   783→  ctx.fillRect(0, 0, imageWidth, imageHeight);
+   784→
+   785→  // Draw each color patch
+   786→  for (let i = 0; i < colors.length; i++) {
+   787→    const col = i % cols;
+   788→    const row = Math.floor(i / cols);
+   789→    const x = gap + col * (patchSize + gap);
+   790→    const y = gap + row * (patchSize + gap);
+   791→
+   792→    const r = Math.round(colors[i].r * 255);
+   793→    const g = Math.round(colors[i].g * 255);
+   794→    const b = Math.round(colors[i].b * 255);
+   795→
+   796→    ctx.fillStyle = `rgb(${r},${g},${b})`;
+   797→    ctx.fillRect(x, y, patchSize, patchSize);
+   798→  }
+   799→
+   800→  return canvas.toDataURL('image/png');
+   801→}
+   802→
+   803→/**
+   804→ * Extract 3DLUT from calibration image pair (original + processed)
+   805→ * @param originalPixels - Sampled RGB values from the original calibration image (RGBA Uint8ClampedArray)
+   806→ * @param processedPixels - Sampled RGB values from the processed calibration image (RGBA Uint8ClampedArray)
+   807→ * @param gridSize - LUT grid size
+   808→ * @param patchSize - Size of each color patch in pixels
+   809→ * @param imageWidth - Width of the calibration image
+   810→ */
+   811→export function extractLUTFromCalibrationPair(
+   812→  originalPixels: Uint8ClampedArray,
+   813→  processedPixels: Uint8ClampedArray,
+   814→  gridSize: number,
+   815→  patchSize: number,
+   816→  imageWidth: number
+   817→): LUT3D {
+   818→  const totalEntries = gridSize * gridSize * gridSize;
+   819→  const gap = 1;
+   820→  const cols = Math.ceil(Math.sqrt(totalEntries));
+   821→  const data = new Float32Array(totalEntries * 3);
+   822→
+   823→  for (let i = 0; i < totalEntries; i++) {
+   824→    const col = i % cols;
+   825→    const row = Math.floor(i / cols);
+   826→
+   827→    // Sample from the center of each patch
+   828→    const sampleX = gap + col * (patchSize + gap) + Math.floor(patchSize / 2);
+   829→    const sampleY = gap + row * (patchSize + gap) + Math.floor(patchSize / 2);
+   830→
+   831→    const pixelIdx = (sampleY * imageWidth + sampleX) * 4;
+   832→
+   833→    // Get the processed pixel value (this is the output of the color transform)
+   834→    const outR = pixelIdx + 4 <= processedPixels.length ? processedPixels[pixelIdx] / 255 : 0;
+   835→    const outG = pixelIdx + 5 <= processedPixels.length ? processedPixels[pixelIdx + 1] / 255 : 0;
+   836→    const outB = pixelIdx + 6 <= processedPixels.length ? processedPixels[pixelIdx + 2] / 255 : 0;
+   837→
+   838→    // Determine which LUT grid point this corresponds to
+   839→    // The colors were laid out in B-outer, G-middle, R-inner order
+   840→    const bi = Math.floor(i / (gridSize * gridSize));
+   841→    const gi = Math.floor((i % (gridSize * gridSize)) / gridSize);
+   842→    const ri = i % gridSize;
+   843→
+   844→    const dataIdx = (bi * gridSize * gridSize + gi * gridSize + ri) * 3;
+   845→    data[dataIdx] = clampVal(outR);
+   846→    data[dataIdx + 1] = clampVal(outG);
+   847→    data[dataIdx + 2] = clampVal(outB);
+   848→  }
+   849→
+   850→  return {
+   851→    name: `校准提取 LUT ${gridSize}³`,
+   852→    size: gridSize,
+   853→    data,
+   854→    inputRange: { min: 0, max: 1 },
+   855→    outputRange: { min: 0, max: 1 },
+   856→  };
+   857→}
+   858→
+   859→/**
+   860→ * Compute color coverage: how many LUT grid points have nearby sample data
+   861→ * @param colorPairs - The sampled color pairs
+   862→ * @param gridSize - LUT grid size
+   863→ * @returns Coverage ratio (0-1) and count
+   864→ */
+   865→export function computeColorCoverage(
+   866→  colorPairs: Array<{ input: [number, number, number]; output: [number, number, number] }>,
+   867→  gridSize: number
+   868→): { ratio: number; covered: number; total: number } {
+   869→  if (colorPairs.length === 0) return { ratio: 0, covered: 0, total: gridSize * gridSize * gridSize };
+   870→
+   871→  const step = 1 / (gridSize - 1);
+   872→  const coverageRadius = step * 1.5; // A grid point is "covered" if a sample is within 1.5 grid steps
+   873→  const total = gridSize * gridSize * gridSize;
+   874→  let covered = 0;
+   875→
+   876→  for (let bi = 0; bi < gridSize; bi++) {
+   877→    for (let gi = 0; gi < gridSize; gi++) {
+   878→      for (let ri = 0; ri < gridSize; ri++) {
+   879→        const gr = ri * step;
+   880→        const gg = gi * step;
+   881→        const gb = bi * step;
+   882→
+   883→        for (const pair of colorPairs) {
+   884→          const dr = gr - pair.input[0];
+   885→          const dg = gg - pair.input[1];
+   886→          const db = gb - pair.input[2];
+   887→          const dist = Math.sqrt(dr * dr + dg * dg + db * db);
+   888→          if (dist <= coverageRadius) {
+   889→            covered++;
+   890→            break;
+   891→          }
+   892→        }
+   893→      }
+   894→    }
+   895→  }
+   896→
+   897→  return { ratio: covered / total, covered, total };
+   898→}
+   899→

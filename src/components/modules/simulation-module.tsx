@@ -212,7 +212,6 @@ function ImageSimulationTab() {
   const [isSimulating, setIsSimulating] = useState(false);
   const [imageInfo, setImageInfo] = useState<{ width: number; height: number } | null>(null);
   const [simExportFormat, setSimExportFormat] = useState<ExportImageFormat>('png');
-  const [patternExportFormat, setPatternExportFormat] = useState<ExportImageFormat>('png');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
@@ -561,6 +560,7 @@ function RGBSimulationTab() {
   const [graySteps, setGraySteps] = useState<number>(32);
   const [grayStepsInput, setGrayStepsInput] = useState<string>('32');
   const [patternSrc, setPatternSrc] = useState<string | null>(null);
+  const [patternExportFormat, setPatternExportFormat] = useState<ExportImageFormat>('png');
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const handlePresetSelect = useCallback((label: string) => {

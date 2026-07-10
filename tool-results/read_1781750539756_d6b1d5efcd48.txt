@@ -1,0 +1,2002 @@
+     1→'use client';
+     2→
+     3→import React, { useState, useRef, useCallback } from 'react';
+     4→import {
+     5→  Tabs,
+     6→  TabsContent,
+     7→  TabsList,
+     8→  TabsTrigger,
+     9→} from '@/components/ui/tabs';
+    10→import {
+    11→  Card,
+    12→  CardContent,
+    13→  CardDescription,
+    14→  CardHeader,
+    15→  CardTitle,
+    16→} from '@/components/ui/card';
+    17→import {
+    18→  Select,
+    19→  SelectContent,
+    20→  SelectItem,
+    21→  SelectTrigger,
+    22→  SelectValue,
+    23→} from '@/components/ui/select';
+    24→import { Input } from '@/components/ui/input';
+    25→import { Label } from '@/components/ui/label';
+    26→import { Button } from '@/components/ui/button';
+    27→import { Badge } from '@/components/ui/badge';
+    28→import { Separator } from '@/components/ui/separator';
+    29→import {
+    30→  Table,
+    31→  TableBody,
+    32→  TableCell,
+    33→  TableHead,
+    34→  TableHeader,
+    35→  TableRow,
+    36→} from '@/components/ui/table';
+    37→import { Textarea } from '@/components/ui/textarea';
+    38→import {
+    39→  BarChart,
+    40→  Bar,
+    41→  XAxis,
+    42→  YAxis,
+    43→  CartesianGrid,
+    44→  Tooltip,
+    45→  ResponsiveContainer,
+    46→  Cell,
+    47→} from 'recharts';
+    48→import {
+    49→  Upload,
+    50→  Play,
+    51→  Download,
+    52→  Copy,
+    53→  FileText,
+    54→  Plus,
+    55→  Trash2,
+    56→  Image as ImageIcon,
+    57→  Palette,
+    58→  BarChart3,
+    59→  GitCompare,
+    60→} from 'lucide-react';
+    61→import {
+    62→  rgbToXYZ,
+    63→  xyzToRgb,
+    64→  xyzToLab,
+    65→  type TransferFunctionName,
+    66→} from '@/lib/color-science/transform';
+    67→import {
+    68→  STANDARD_GAMUTS,
+    69→  getGamutNames,
+    70→} from '@/lib/color-science/gamuts';
+    71→import { getTransferFunctionNames } from '@/lib/color-science/tf-gamma';
+    72→import {
+    73→  deltaE76,
+    74→  deltaE94,
+    75→  deltaE2000,
+    76→  interpretDeltaE,
+    77→  deltaEStatistics,
+    78→} from '@/lib/color-science/delta-e';
+    79→import { useAppStore } from '@/lib/store/app-store';
+    80→import {
+    81→  createColorSpaceLUT,
+    82→  applyLUTToImageData,
+    83→} from '@/lib/color-science/lut3d';
+    84→import { loadImageRaw, IMAGE_ACCEPT_STRING } from '@/lib/color-science/image-loader';
+    85→import {
+    86→  exportDataUrlAsFormat,
+    87→  exportCanvasAsFormat,
+    88→  EXPORT_FORMAT_OPTIONS,
+    89→  type ExportImageFormat,
+    90→} from '@/lib/color-science/image-formats';
+    91→
+    92→// ─── Types ───────────────────────────────────────────────────────────────────
+    93→
+    94→interface DeltaEBatchEntry {
+    95→  id: number;
+    96→  refR: number;
+    97→  refG: number;
+    98→  refB: number;
+    99→  testR: number;
+   100→  testG: number;
+   101→  testB: number;
+   102→  deltaE: number;
+   103→  method: string;
+   104→  lab1: { L: number; a: number; b: number };
+   105→  lab2: { L: number; a: number; b: number };
+   106→  interpretation: { level: string; description: string; color: string };
+   107→}
+   108→
+   109→interface PipelineResult {
+   110→  linearR: number;
+   111→  linearG: number;
+   112→  linearB: number;
+   113→  xyzX: number;
+   114→  xyzY: number;
+   115→  xyzZ: number;
+   116→  x: number;
+   117→  y: number;
+   118→  Y: number;
+   119→  labL: number;
+   120→  labA: number;
+   121→  labB: number;
+   122→  outR: number;
+   123→  outG: number;
+   124→  outB: number;
+   125→}
+   126→
+   127→// ─── Shared data ─────────────────────────────────────────────────────────────
+   128→
+   129→const gamutNames = getGamutNames();
+   130→const tfNames = getTransferFunctionNames();
+   131→const PRESET_RESOLUTIONS = [
+   132→  { label: '256×256', w: 256, h: 256 },
+   133→  { label: '512×512', w: 512, h: 512 },
+   134→  { label: '1024×1024', w: 1024, h: 1024 },
+   135→  { label: '1280×720', w: 1280, h: 720 },
+   136→  { label: '1920×1080', w: 1920, h: 1080 },
+   137→  { label: '3840×2160', w: 3840, h: 2160 },
+   138→];
+   139→
+   140→// ─── Component ───────────────────────────────────────────────────────────────
+   141→
+   142→export default function SimulationModule() {
+   143→  const { activeTab, setActiveTab } = useAppStore();
+   144→  const currentTab = ['image-sim', 'rgb-sim', 'value-compare', 'error-eval', 'report'].includes(activeTab) ? activeTab : 'image-sim';
+   145→  return (
+   146→    <div className="p-4 space-y-4 max-w-[1400px] mx-auto">
+   147→      <Tabs value={currentTab} onValueChange={setActiveTab} className="w-full">
+   148→        <TabsList className="grid w-full grid-cols-5">
+   149→          <TabsTrigger value="image-sim" className="text-xs sm:text-sm">
+   150→            <ImageIcon className="h-3.5 w-3.5 mr-1 hidden sm:inline-block" />
+   151→            图片仿真
+   152→          </TabsTrigger>
+   153→          <TabsTrigger value="rgb-sim" className="text-xs sm:text-sm">
+   154→            <Palette className="h-3.5 w-3.5 mr-1 hidden sm:inline-block" />
+   155→            RGB 仿真
+   156→          </TabsTrigger>
+   157→          <TabsTrigger value="value-compare" className="text-xs sm:text-sm">
+   158→            <GitCompare className="h-3.5 w-3.5 mr-1 hidden sm:inline-block" />
+   159→            数值对比
+   160→          </TabsTrigger>
+   161→          <TabsTrigger value="error-eval" className="text-xs sm:text-sm">
+   162→            <BarChart3 className="h-3.5 w-3.5 mr-1 hidden sm:inline-block" />
+   163→            误差评估
+   164→          </TabsTrigger>
+   165→          <TabsTrigger value="report" className="text-xs sm:text-sm">
+   166→            <FileText className="h-3.5 w-3.5 mr-1 hidden sm:inline-block" />
+   167→            结果报告
+   168→          </TabsTrigger>
+   169→        </TabsList>
+   170→
+   171→        {/* ───────────── Tab 1: Image Simulation ───────────── */}
+   172→        <TabsContent value="image-sim">
+   173→          <ImageSimulationTab />
+   174→        </TabsContent>
+   175→
+   176→        {/* ───────────── Tab 2: RGB Simulation ───────────── */}
+   177→        <TabsContent value="rgb-sim">
+   178→          <RGBSimulationTab />
+   179→        </TabsContent>
+   180→
+   181→        {/* ───────────── Tab 3: Value Comparison ───────────── */}
+   182→        <TabsContent value="value-compare">
+   183→          <ValueComparisonTab />
+   184→        </TabsContent>
+   185→
+   186→        {/* ───────────── Tab 4: Error Assessment ───────────── */}
+   187→        <TabsContent value="error-eval">
+   188→          <ErrorAssessmentTab />
+   189→        </TabsContent>
+   190→
+   191→        {/* ───────────── Tab 5: Report ───────────── */}
+   192→        <TabsContent value="report">
+   193→          <ResultsReportTab />
+   194→        </TabsContent>
+   195→      </Tabs>
+   196→    </div>
+   197→  );
+   198→}
+   199→
+   200→// ═══════════════════════════════════════════════════════════════════════════════
+   201→// TAB 1: Image Simulation
+   202→// ═══════════════════════════════════════════════════════════════════════════════
+   203→
+   204→function ImageSimulationTab() {
+   205→  const [srcGamut, setSrcGamut] = useState<string>('sRGB');
+   206→  const [srcTF, setSrcTF] = useState<TransferFunctionName>('sRGB');
+   207→  const [dstGamut, setDstGamut] = useState<string>('DCI_P3');
+   208→  const [dstTF, setDstTF] = useState<TransferFunctionName>('sRGB');
+   209→  const [imageSrc, setImageSrc] = useState<string | null>(null);
+   210→  const [simulatedSrc, setSimulatedSrc] = useState<string | null>(null);
+   211→  const [isDragging, setIsDragging] = useState(false);
+   212→  const [isSimulating, setIsSimulating] = useState(false);
+   213→  const [imageInfo, setImageInfo] = useState<{ width: number; height: number } | null>(null);
+   214→  const [simExportFormat, setSimExportFormat] = useState<ExportImageFormat>('png');
+   215→
+   216→  const fileInputRef = useRef<HTMLInputElement>(null);
+   217→  const imageRef = useRef<HTMLImageElement | null>(null);
+   218→  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+   219→  const hiddenCanvasRef = useRef<HTMLCanvasElement | null>(null);
+   220→  const imageFileRef = useRef<File | null>(null); // keep File for raw loading
+   221→
+   222→  const handleFile = useCallback((file: File) => {
+   223→    // Allow image/* types and EXR/TIFF files (which may not have image/ MIME type)
+   224→    const isExrOrTiff = file.name.toLowerCase().endsWith('.exr') || file.name.toLowerCase().endsWith('.tiff') || file.name.toLowerCase().endsWith('.tif');
+   225→    if (!file.type.startsWith('image/') && !isExrOrTiff) return;
+   226→    imageFileRef.current = file;
+   227→    setSimulatedSrc(null);
+   228→    setImageInfo(null);
+   229→    // Load without ICC conversion for correct preview
+   230→    loadImageRaw(file).then((result) => {
+   231→      setImageSrc(result.dataUrl);
+   232→      setImageInfo({ width: result.width, height: result.height });
+   233→    }).catch(() => {
+   234→      // Fallback to blob URL
+   235→      setImageSrc(URL.createObjectURL(file));
+   236→    });
+   237→  }, []);
+   238→
+   239→  const handleDrop = useCallback(
+   240→    (e: React.DragEvent) => {
+   241→      e.preventDefault();
+   242→      setIsDragging(false);
+   243→      const file = e.dataTransfer.files[0];
+   244→      if (file) handleFile(file);
+   245→    },
+   246→    [handleFile]
+   247→  );
+   248→
+   249→  const handleDragOver = useCallback((e: React.DragEvent) => {
+   250→    e.preventDefault();
+   251→    setIsDragging(true);
+   252→  }, []);
+   253→
+   254→  const handleDragLeave = useCallback(() => setIsDragging(false), []);
+   255→
+   256→  const handleImageLoad = useCallback(() => {
+   257→    if (imageRef.current) {
+   258→      setImageInfo({
+   259→        width: imageRef.current.naturalWidth,
+   260→        height: imageRef.current.naturalHeight,
+   261→      });
+   262→    }
+   263→  }, []);
+   264→
+   265→  const simulateImage = useCallback(() => {
+   266→    if (!imageFileRef.current) return;
+   267→    setIsSimulating(true);
+   268→
+   269→    // Load image without ICC conversion for correct pixel processing
+   270→    loadImageRaw(imageFileRef.current).then((rawResult) => {
+   271→      try {
+   272→        const canvas = hiddenCanvasRef.current;
+   273→        if (!canvas) return;
+   274→        canvas.width = rawResult.width;
+   275→        canvas.height = rawResult.height;
+   276→        const ctx = canvas.getContext('2d');
+   277→        if (!ctx) return;
+   278→        ctx.drawImage(rawResult.canvas, 0, 0);
+   279→        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+   280→
+   281→        const lut = createColorSpaceLUT(33, srcGamut, srcTF, dstGamut, dstTF);
+   282→        const result = applyLUTToImageData(lut, imageData);
+   283→        ctx.putImageData(result, 0, 0);
+   284→
+   285→        setSimulatedSrc(canvas.toDataURL('image/png'));
+   286→      } catch {
+   287→        // silently handle errors
+   288→      } finally {
+   289→        setIsSimulating(false);
+   290→      }
+   291→    }).catch(() => {
+   292→      setIsSimulating(false);
+   293→    });
+   294→  }, [srcGamut, srcTF, dstGamut, dstTF]);
+   295→
+   296→  const handleDownloadSimulated = useCallback(async () => {
+   297→    if (!simulatedSrc) return;
+   298→    try {
+   299→      await exportDataUrlAsFormat(
+   300→        simulatedSrc,
+   301→        `simulated_${srcGamut}_to_${dstGamut}`,
+   302→        simExportFormat
+   303→      );
+   304→    } catch {
+   305→      // Fallback to simple PNG download
+   306→      const a = document.createElement('a');
+   307→      a.href = simulatedSrc;
+   308→      a.download = `simulated_${srcGamut}_to_${dstGamut}.png`;
+   309→      a.click();
+   310→    }
+   311→  }, [simulatedSrc, srcGamut, dstGamut, simExportFormat]);
+   312→
+   313→  return (
+   314→    <div className="space-y-4">
+   315→      {/* Controls */}
+   316→      <Card>
+   317→        <CardHeader className="pb-3">
+   318→          <CardTitle className="text-base">色彩空间转换仿真</CardTitle>
+   319→          <CardDescription>上传图片，选择源/目标色彩空间，预览转换效果</CardDescription>
+   320→        </CardHeader>
+   321→        <CardContent className="space-y-4">
+   322→          {/* Gamut / TF selectors */}
+   323→          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+   324→            <div className="space-y-2">
+   325→              <Label className="text-sm font-medium">源色彩空间</Label>
+   326→              <div className="grid grid-cols-2 gap-2">
+   327→                <Select value={srcGamut} onValueChange={setSrcGamut}>
+   328→                  <SelectTrigger className="h-9">
+   329→                    <SelectValue placeholder="色域" />
+   330→                  </SelectTrigger>
+   331→                  <SelectContent>
+   332→                    {gamutNames.map((g) => (
+   333→                      <SelectItem key={g} value={g}>
+   334→                        {STANDARD_GAMUTS[g]?.name || g}
+   335→                      </SelectItem>
+   336→                    ))}
+   337→                  </SelectContent>
+   338→                </Select>
+   339→                <Select value={srcTF} onValueChange={(v) => setSrcTF(v as TransferFunctionName)}>
+   340→                  <SelectTrigger className="h-9">
+   341→                    <SelectValue placeholder="传输函数" />
+   342→                  </SelectTrigger>
+   343→                  <SelectContent>
+   344→                    {tfNames.map((tf) => (
+   345→                      <SelectItem key={tf} value={tf}>
+   346→                        {tf}
+   347→                      </SelectItem>
+   348→                    ))}
+   349→                  </SelectContent>
+   350→                </Select>
+   351→              </div>
+   352→            </div>
+   353→            <div className="space-y-2">
+   354→              <Label className="text-sm font-medium">目标色彩空间</Label>
+   355→              <div className="grid grid-cols-2 gap-2">
+   356→                <Select value={dstGamut} onValueChange={setDstGamut}>
+   357→                  <SelectTrigger className="h-9">
+   358→                    <SelectValue placeholder="色域" />
+   359→                  </SelectTrigger>
+   360→                  <SelectContent>
+   361→                    {gamutNames.map((g) => (
+   362→                      <SelectItem key={g} value={g}>
+   363→                        {STANDARD_GAMUTS[g]?.name || g}
+   364→                      </SelectItem>
+   365→                    ))}
+   366→                  </SelectContent>
+   367→                </Select>
+   368→                <Select value={dstTF} onValueChange={(v) => setDstTF(v as TransferFunctionName)}>
+   369→                  <SelectTrigger className="h-9">
+   370→                    <SelectValue placeholder="传输函数" />
+   371→                  </SelectTrigger>
+   372→                  <SelectContent>
+   373→                    {tfNames.map((tf) => (
+   374→                      <SelectItem key={tf} value={tf}>
+   375→                        {tf}
+   376→                      </SelectItem>
+   377→                    ))}
+   378→                  </SelectContent>
+   379→                </Select>
+   380→              </div>
+   381→            </div>
+   382→          </div>
+   383→
+   384→          {/* Pipeline info */}
+   385→          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+   386→            <span className="font-medium text-foreground">{STANDARD_GAMUTS[srcGamut]?.name || srcGamut}</span>
+   387→            <span>+ {srcTF}</span>
+   388→            <span className="mx-1">→</span>
+   389→            <span className="font-medium text-foreground">{STANDARD_GAMUTS[dstGamut]?.name || dstGamut}</span>
+   390→            <span>+ {dstTF}</span>
+   391→          </div>
+   392→
+   393→          <Separator />
+   394→
+   395→          {/* Image upload */}
+   396→          <div
+   397→            onDrop={handleDrop}
+   398→            onDragOver={handleDragOver}
+   399→            onDragLeave={handleDragLeave}
+   400→            onClick={() => fileInputRef.current?.click()}
+   401→            className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
+   402→              isDragging
+   403→                ? 'border-primary bg-primary/5'
+   404→                : 'border-muted-foreground/25 hover:border-primary/50'
+   405→            }`}
+   406→          >
+   407→            <input
+   408→              ref={fileInputRef}
+   409→              type="file"
+   410→              accept={IMAGE_ACCEPT_STRING}
+   411→              className="hidden"
+   412→              onChange={(e) => {
+   413→                const file = e.target.files?.[0];
+   414→                if (file) handleFile(file);
+   415→              }}
+   416→            />
+   417→            <Upload className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
+   418→            <p className="text-sm text-muted-foreground">
+   419→              拖拽图片到此处或点击上传
+   420→            </p>
+   421→            <p className="text-xs text-muted-foreground/60 mt-0.5">
+   422→              支持 PNG / JPEG / WebP / TIFF / EXR
+   423→            </p>
+   424→            {imageInfo && (
+   425→              <p className="text-xs text-muted-foreground mt-1">
+   426→                {imageInfo.width} × {imageInfo.height}px
+   427→              </p>
+   428→            )}
+   429→          </div>
+   430→
+   431→          {/* Simulate button */}
+   432→          <div className="flex gap-2">
+   433→            <Button
+   434→              onClick={simulateImage}
+   435→              disabled={!imageSrc || isSimulating}
+   436→              className="gap-1"
+   437→            >
+   438→              <Play className="h-3.5 w-3.5" />
+   439→              {isSimulating ? '处理中...' : '仿真'}
+   440→            </Button>
+   441→            {simulatedSrc && (
+   442→              <div className="flex items-center gap-2">
+   443→                <Select value={simExportFormat} onValueChange={(v) => setSimExportFormat(v as ExportImageFormat)}>
+   444→                  <SelectTrigger className="h-8 w-28 text-xs">
+   445→                    <SelectValue />
+   446→                  </SelectTrigger>
+   447→                  <SelectContent>
+   448→                    {EXPORT_FORMAT_OPTIONS.map((opt) => (
+   449→                      <SelectItem key={opt.value} value={opt.value} className="text-xs">
+   450→                        {opt.label}
+   451→                      </SelectItem>
+   452→                    ))}
+   453→                  </SelectContent>
+   454→                </Select>
+   455→                <Button variant="outline" onClick={handleDownloadSimulated} className="gap-1">
+   456→                  <Download className="h-3.5 w-3.5" />
+   457→                  下载结果
+   458→                </Button>
+   459→              </div>
+   460→            )}
+   461→          </div>
+   462→        </CardContent>
+   463→      </Card>
+   464→
+   465→      {/* Side-by-side display */}
+   466→      {imageSrc && (
+   467→        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+   468→          <Card>
+   469→            <CardHeader className="pb-2">
+   470→              <CardTitle className="text-sm flex items-center gap-2">
+   471→                原图
+   472→                {imageInfo && (
+   473→                  <Badge variant="secondary" className="text-[10px]">
+   474→                    {imageInfo.width}×{imageInfo.height}
+   475→                  </Badge>
+   476→                )}
+   477→              </CardTitle>
+   478→            </CardHeader>
+   479→            <CardContent className="p-3">
+   480→              <div className="relative bg-[repeating-conic-gradient(#e5e7eb_0%_25%,#fff_0%_50%)] bg-[length:16px_16px] rounded-md overflow-hidden">
+   481→                <img
+   482→                  ref={imageRef}
+   483→                  src={imageSrc}
+   484→                  alt="Original"
+   485→                  className="w-full h-auto max-h-[500px] object-contain"
+   486→                  onLoad={handleImageLoad}
+   487→                  crossOrigin="anonymous"
+   488→                />
+   489→              </div>
+   490→            </CardContent>
+   491→          </Card>
+   492→
+   493→          <Card>
+   494→            <CardHeader className="pb-2">
+   495→              <CardTitle className="text-sm">仿真结果</CardTitle>
+   496→            </CardHeader>
+   497→            <CardContent className="p-3">
+   498→              <div className="relative bg-[repeating-conic-gradient(#e5e7eb_0%_25%,#fff_0%_50%)] bg-[length:16px_16px] rounded-md overflow-hidden min-h-[200px] flex items-center justify-center">
+   499→                {simulatedSrc ? (
+   500→                  <img
+   501→                    src={simulatedSrc}
+   502→                    alt="Simulated"
+   503→                    className="w-full h-auto max-h-[500px] object-contain"
+   504→                  />
+   505→                ) : (
+   506→                  <div className="text-sm text-muted-foreground">
+   507→                    {isSimulating ? '处理中...' : '点击"仿真"按钮查看转换结果'}
+   508→                  </div>
+   509→                )}
+   510→              </div>
+   511→            </CardContent>
+   512→          </Card>
+   513→        </div>
+   514→      )}
+   515→
+   516→      {/* Hidden canvas for processing */}
+   517→      <canvas ref={hiddenCanvasRef} className="hidden" />
+   518→    </div>
+   519→  );
+   520→}
+   521→
+   522→// ═══════════════════════════════════════════════════════════════════════════════
+   523→// TAB 2: RGB Simulation
+   524→// ═══════════════════════════════════════════════════════════════════════════════
+   525→
+   526→type PatternType =
+   527→  | 'grayscale'
+   528→  | 'grayscaleSteps'
+   529→  | 'colorBars'
+   530→  | 'smpteBars'
+   531→  | 'rgbRamp'
+   532→  | 'patches'
+   533→  | 'checkerboard'
+   534→  | 'convergence'
+   535→  | 'crosshatch'
+   536→  | 'colorChart';
+   537→
+   538→const PATTERN_OPTIONS: { value: PatternType; label: string; desc: string }[] = [
+   539→  { value: 'grayscale', label: '灰度渐变', desc: '0~255 连续渐变' },
+   540→  { value: 'grayscaleSteps', label: '灰阶条', desc: '可自定义级数的灰阶' },
+   541→  { value: 'colorBars', label: '色条 (RGBYCM)', desc: '8 色纯色条' },
+   542→  { value: 'smpteBars', label: 'SMPTE 色条', desc: '标准 SMPTE 测试条' },
+   543→  { value: 'rgbRamp', label: 'RGB 渐变', desc: '三通道独立渐变' },
+   544→  { value: 'patches', label: '色块阵列', desc: 'ColorChecker 风格' },
+   545→  { value: 'checkerboard', label: '棋盘格', desc: '黑白交替方格' },
+   546→  { value: 'convergence', label: '会聚测试', desc: 'RGB 对齐检测' },
+   547→  { value: 'crosshatch', label: '网格线', desc: '精细网格线条' },
+   548→  { value: 'colorChart', label: 'ColorChecker 24', desc: 'X-Rite 标准 24 色卡' },
+   549→];
+   550→
+   551→function getTextColorForBg(r: number, g: number, b: number): string {
+   552→  return (r * 0.299 + g * 0.587 + b * 0.114) > 128 ? '#000000' : '#ffffff';
+   553→}
+   554→
+   555→function RGBSimulationTab() {
+   556→  const [patternType, setPatternType] = useState<PatternType>('colorBars');
+   557→  const [resW, setResW] = useState<number>(1920);
+   558→  const [resH, setResH] = useState<number>(1080);
+   559→  const [resPreset, setResPreset] = useState<string>('1920×1080');
+   560→  const [graySteps, setGraySteps] = useState<number>(32);
+   561→  const [grayStepsInput, setGrayStepsInput] = useState<string>('32');
+   562→  const [patternSrc, setPatternSrc] = useState<string | null>(null);
+   563→  const [patternExportFormat, setPatternExportFormat] = useState<ExportImageFormat>('png');
+   564→  const canvasRef = useRef<HTMLCanvasElement>(null);
+   565→
+   566→  const handlePresetSelect = useCallback((label: string) => {
+   567→    setResPreset(label);
+   568→    const preset = PRESET_RESOLUTIONS.find((p) => p.label === label);
+   569→    if (preset) { setResW(preset.w); setResH(preset.h); }
+   570→  }, []);
+   571→
+   572→  const handleCustomW = useCallback((v: string) => {
+   573→    const n = parseInt(v, 10);
+   574→    if (n > 0 && n <= 8192) { setResW(n); setResPreset('custom'); }
+   575→  }, []);
+   576→
+   577→  const handleCustomH = useCallback((v: string) => {
+   578→    const n = parseInt(v, 10);
+   579→    if (n > 0 && n <= 8192) { setResH(n); setResPreset('custom'); }
+   580→  }, []);
+   581→
+   582→  const generatePattern = useCallback(() => {
+   583→    const canvas = canvasRef.current;
+   584→    if (!canvas) return;
+   585→
+   586→    canvas.width = resW;
+   587→    canvas.height = resH;
+   588→    const ctx = canvas.getContext('2d');
+   589→    if (!ctx) return;
+   590→    ctx.clearRect(0, 0, resW, resH);
+   591→
+   592→    switch (patternType) {
+   593→      case 'grayscale': {
+   594→        const gradient = ctx.createLinearGradient(0, 0, resW, 0);
+   595→        for (let i = 0; i <= 256; i++) {
+   596→          const v = Math.round(i);
+   597→          gradient.addColorStop(i / 256, `rgb(${v},${v},${v})`);
+   598→        }
+   599→        ctx.fillStyle = gradient;
+   600→        ctx.fillRect(0, 0, resW, resH);
+   601→        break;
+   602→      }
+   603→
+   604→      case 'grayscaleSteps': {
+   605→        const steps = Math.max(2, Math.min(256, graySteps));
+   606→        const barW = resW / steps;
+   607→        for (let i = 0; i < steps; i++) {
+   608→          const v = Math.round((i / (steps - 1)) * 255);
+   609→          ctx.fillStyle = `rgb(${v},${v},${v})`;
+   610→          ctx.fillRect(Math.floor(i * barW), 0, Math.ceil(barW) + 1, resH);
+   611→          ctx.fillStyle = getTextColorForBg(v, v, v);
+   612→          const fontSize = Math.max(10, Math.min(barW / 4, resH / 8));
+   613→          ctx.font = `bold ${fontSize}px monospace`;
+   614→          ctx.textAlign = 'center';
+   615→          ctx.textBaseline = 'middle';
+   616→          ctx.fillText(String(v), (i + 0.5) * barW, resH * 0.4);
+   617→          ctx.font = `${Math.max(8, fontSize * 0.7)}px monospace`;
+   618→          ctx.fillText(`${((v / 255) * 100).toFixed(1)}%`, (i + 0.5) * barW, resH * 0.6);
+   619→        }
+   620→        break;
+   621→      }
+   622→
+   623→      case 'colorBars': {
+   624→        const bars = [
+   625→          [255, 0, 0], [0, 255, 0], [0, 0, 255],
+   626→          [0, 255, 255], [255, 0, 255], [255, 255, 0],
+   627→          [255, 255, 255], [0, 0, 0],
+   628→        ];
+   629→        const labels = ['R', 'G', 'B', 'C', 'M', 'Y', 'W', 'K'];
+   630→        const barW = resW / bars.length;
+   631→        bars.forEach(([r, g, b], i) => {
+   632→          ctx.fillStyle = `rgb(${r},${g},${b})`;
+   633→          ctx.fillRect(Math.floor(i * barW), 0, Math.ceil(barW) + 1, resH);
+   634→          ctx.fillStyle = getTextColorForBg(r, g, b);
+   635→          const fontSize = Math.max(14, Math.min(barW / 3, resH / 10));
+   636→          ctx.font = `bold ${fontSize}px monospace`;
+   637→          ctx.textAlign = 'center';
+   638→          ctx.textBaseline = 'middle';
+   639→          ctx.fillText(labels[i], (i + 0.5) * barW, resH / 2);
+   640→        });
+   641→        break;
+   642→      }
+   643→
+   644→      case 'smpteBars': {
+   645→        const topH = Math.floor(resH * 0.67);
+   646→        const midH = Math.floor(resH * 0.08);
+   647→        const botH = resH - topH - midH;
+   648→        const topBars = [
+   649→          [192, 192, 192], [192, 192, 0], [0, 192, 192],
+   650→          [0, 192, 0], [192, 0, 192], [192, 0, 0], [0, 0, 192],
+   651→        ];
+   652→        const topBarW = resW / 7;
+   653→        topBars.forEach(([r, g, b], i) => {
+   654→          ctx.fillStyle = `rgb(${r},${g},${b})`;
+   655→          ctx.fillRect(Math.floor(i * topBarW), 0, Math.ceil(topBarW) + 1, topH);
+   656→        });
+   657→        const plugeColors = [[0, 40, 40], [0, 0, 40], [40, 0, 40], [0, 0, 0], [0, 0, 0], [40, 40, 40]];
+   658→        const plugeW = resW / plugeColors.length;
+   659→        plugeColors.forEach(([r, g, b], i) => {
+   660→          ctx.fillStyle = `rgb(${r},${g},${b})`;
+   661→          ctx.fillRect(Math.floor(i * plugeW), topH, Math.ceil(plugeW) + 1, midH);
+   662→        });
+   663→        const botBarW = resW / 7;
+   664→        ctx.fillStyle = '#000000';
+   665→        ctx.fillRect(0, topH + midH, Math.floor(botBarW * 3), botH);
+   666→        for (let i = 3; i < 7; i++) {
+   667→          ctx.fillStyle = `rgb(${topBars[i][0]},${topBars[i][1]},${topBars[i][2]})`;
+   668→          ctx.fillRect(Math.floor(i * botBarW), topH + midH, Math.ceil(botBarW) + 1, botH);
+   669→        }
+   670→        break;
+   671→      }
+   672→
+   673→      case 'rgbRamp': {
+   674→        const bandH = resH / 3;
+   675→        const channels: [number, number, number, string][] = [
+   676→          [0, 0, 0, 'R'], [bandH, 0, 0, 'G'], [bandH * 2, 0, 0, 'B'],
+   677→        ];
+   678→        const makeGrad = (ri: number, gi: number, bi: number) => {
+   679→          const g = ctx.createLinearGradient(0, 0, resW, 0);
+   680→          for (let i = 0; i <= 256; i++) {
+   681→            const v = Math.round(i);
+   682→            g.addColorStop(i / 256, `rgb(${ri ? v : 0},${gi ? v : 0},${bi ? v : 0})`);
+   683→          }
+   684→          return g;
+   685→        };
+   686→        ctx.fillStyle = makeGrad(1, 0, 0);
+   687→        ctx.fillRect(0, 0, resW, bandH);
+   688→        ctx.fillStyle = makeGrad(0, 1, 0);
+   689→        ctx.fillRect(0, bandH, resW, bandH);
+   690→        ctx.fillStyle = makeGrad(0, 0, 1);
+   691→        ctx.fillRect(0, bandH * 2, resW, bandH);
+   692→        ctx.font = `bold ${Math.max(12, Math.min(bandH / 4, resW / 25))}px monospace`;
+   693→        ctx.textAlign = 'left';
+   694→        ctx.textBaseline = 'middle';
+   695→        ctx.fillStyle = '#ffffff';
+   696→        ctx.fillText('R', 8, bandH / 2);
+   697→        ctx.fillText('G', 8, bandH * 1.5);
+   698→        ctx.fillText('B', 8, bandH * 2.5);
+   699→        ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+   700→        ctx.lineWidth = 2;
+   701→        ctx.beginPath(); ctx.moveTo(0, bandH); ctx.lineTo(resW, bandH); ctx.stroke();
+   702→        ctx.beginPath(); ctx.moveTo(0, bandH * 2); ctx.lineTo(resW, bandH * 2); ctx.stroke();
+   703→        break;
+   704→      }
+   705→
+   706→      case 'patches': {
+   707→        const colors: { label: string; rgb: number[] }[] = [
+   708→          { label: 'White', rgb: [255, 255, 255] },
+   709→          { label: 'Black', rgb: [0, 0, 0] },
+   710→          { label: 'Red', rgb: [255, 0, 0] },
+   711→          { label: 'Green', rgb: [0, 255, 0] },
+   712→          { label: 'Blue', rgb: [0, 0, 255] },
+   713→          { label: 'Cyan', rgb: [0, 255, 255] },
+   714→          { label: 'Magenta', rgb: [255, 0, 255] },
+   715→          { label: 'Yellow', rgb: [255, 255, 0] },
+   716→          { label: '25% Gray', rgb: [64, 64, 64] },
+   717→          { label: '50% Gray', rgb: [128, 128, 128] },
+   718→          { label: '75% Gray', rgb: [192, 192, 192] },
+   719→          { label: 'sRed', rgb: [190, 25, 49] },
+   720→          { label: 'sGreen', rgb: [66, 150, 56] },
+   721→          { label: 'sBlue', rgb: [30, 68, 166] },
+   722→          { label: 'sYellow', rgb: [255, 210, 0] },
+   723→          { label: 'Skin', rgb: [255, 178, 128] },
+   724→          { label: 'Orange', rgb: [255, 120, 0] },
+   725→          { label: 'Purple', rgb: [128, 0, 128] },
+   726→          { label: 'Teal', rgb: [0, 128, 128] },
+   727→          { label: 'Pink', rgb: [255, 105, 180] },
+   728→        ];
+   729→        const cols = 5;
+   730→        const rows = Math.ceil(colors.length / cols);
+   731→        const cellW = resW / cols;
+   732→        const cellH = resH / rows;
+   733→        colors.forEach(({ label, rgb: [r, g, b] }, i) => {
+   734→          const col = i % cols;
+   735→          const row = Math.floor(i / cols);
+   736→          ctx.fillStyle = `rgb(${r},${g},${b})`;
+   737→          ctx.fillRect(col * cellW, row * cellH, cellW, cellH);
+   738→          ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+   739→          ctx.lineWidth = 1;
+   740→          ctx.strokeRect(col * cellW, row * cellH, cellW, cellH);
+   741→          ctx.fillStyle = getTextColorForBg(r, g, b);
+   742→          const fs1 = Math.max(8, cellW / 5);
+   743→          ctx.font = `bold ${fs1}px monospace`;
+   744→          ctx.textAlign = 'center';
+   745→          ctx.textBaseline = 'middle';
+   746→          ctx.fillText(label, col * cellW + cellW / 2, row * cellH + cellH * 0.4);
+   747→          const fs2 = Math.max(7, cellW / 8);
+   748→          ctx.font = `${fs2}px monospace`;
+   749→          ctx.fillText(`${r}, ${g}, ${b}`, col * cellW + cellW / 2, row * cellH + cellH * 0.65);
+   750→        });
+   751→        break;
+   752→      }
+   753→
+   754→      case 'checkerboard': {
+   755→        const size = 8;
+   756→        const cellW = resW / size;
+   757→        const cellH = resH / size;
+   758→        for (let r = 0; r < size; r++) {
+   759→          for (let c = 0; c < size; c++) {
+   760→            ctx.fillStyle = (r + c) % 2 === 0 ? '#ffffff' : '#000000';
+   761→            ctx.fillRect(Math.floor(c * cellW), Math.floor(r * cellH), Math.ceil(cellW) + 1, Math.ceil(cellH) + 1);
+   762→          }
+   763→        }
+   764→        break;
+   765→      }
+   766→
+   767→      case 'convergence': {
+   768→        ctx.fillStyle = '#000000';
+   769→        ctx.fillRect(0, 0, resW, resH);
+   770→        const cx = resW / 2;
+   771→        const cy = resH / 2;
+   772→        const maxR = Math.min(resW, resH) * 0.45;
+   773→        for (let ch = 0; ch < 3; ch++) {
+   774→          const colors = ['#ff0000', '#00ff00', '#0000ff'];
+   775→          const offsets = [-3, 0, 3];
+   776→          ctx.strokeStyle = colors[ch];
+   777→          ctx.lineWidth = 2;
+   778→          for (let ring = 1; ring <= 6; ring++) {
+   779→            ctx.beginPath();
+   780→            ctx.arc(cx + offsets[ch], cy, (ring / 6) * maxR, 0, Math.PI * 2);
+   781→            ctx.stroke();
+   782→          }
+   783→        }
+   784→        for (let ch = 0; ch < 3; ch++) {
+   785→          const colors = ['#ff0000', '#00ff00', '#0000ff'];
+   786→          const offsets = [-3, 0, 3];
+   787→          ctx.strokeStyle = colors[ch];
+   788→          ctx.lineWidth = 2;
+   789→          ctx.beginPath(); ctx.moveTo(cx + offsets[ch], cy - maxR); ctx.lineTo(cx + offsets[ch], cy + maxR); ctx.stroke();
+   790→          ctx.beginPath(); ctx.moveTo(cx - maxR, cy + offsets[ch]); ctx.lineTo(cx + maxR, cy + offsets[ch]); ctx.stroke();
+   791→        }
+   792→        const markSize = maxR * 0.15;
+   793→        [[cx - maxR, cy - maxR], [cx + maxR, cy - maxR], [cx - maxR, cy + maxR], [cx + maxR, cy + maxR]].forEach(([mx, my]) => {
+   794→          ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2;
+   795→          ctx.beginPath(); ctx.moveTo(mx - markSize, my); ctx.lineTo(mx + markSize, my); ctx.stroke();
+   796→          ctx.beginPath(); ctx.moveTo(mx, my - markSize); ctx.lineTo(mx, my + markSize); ctx.stroke();
+   797→        });
+   798→        ctx.fillStyle = '#ffffff';
+   799→        ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2); ctx.fill();
+   800→        break;
+   801→      }
+   802→
+   803→      case 'crosshatch': {
+   804→        ctx.fillStyle = '#808080';
+   805→        ctx.fillRect(0, 0, resW, resH);
+   806→        const gridSpacing = Math.max(4, Math.round(Math.min(resW, resH) / 100));
+   807→        ctx.strokeStyle = '#000000'; ctx.lineWidth = 1;
+   808→        for (let x = 0; x <= resW; x += gridSpacing) {
+   809→          ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, resH); ctx.stroke();
+   810→        }
+   811→        for (let y = 0; y <= resH; y += gridSpacing) {
+   812→          ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(resW, y + 0.5); ctx.stroke();
+   813→        }
+   814→        break;
+   815→      }
+   816→
+   817→      case 'colorChart': {
+   818→        // X-Rite ColorChecker Classic 24 标准色卡 (sRGB 近似值)
+   819→        // 4 列 × 6 行标准布局
+   820→        const patches: { label: string; rgb: [number, number, number] }[] = [
+   821→          // Row 1: Skin tones & sky
+   822→          { label: 'Dark Skin',    rgb: [115, 82, 68] },
+   823→          { label: 'Light Skin',   rgb: [194, 150, 130] },
+   824→          { label: 'Blue Sky',     rgb: [98, 122, 157] },
+   825→          { label: 'Foliage',      rgb: [87, 108, 67] },
+   826→          // Row 2: Colorful
+   827→          { label: 'Blue Flower',  rgb: [130, 128, 177] },
+   828→          { label: 'Bluish Green', rgb: [103, 189, 170] },
+   829→          { label: 'Orange',       rgb: [213, 115, 78] },
+   830→          { label: 'Purplish Blue', rgb: [72, 100, 161] },
+   831→          // Row 3: More colors
+   832→          { label: 'Moderate Red', rgb: [186, 59, 53] },
+   833→          { label: 'Purple',       rgb: [104, 55, 96] },
+   834→          { label: 'Yellow Green', rgb: [150, 200, 86] },
+   835→          { label: 'Orange Yellow', rgb: [230, 176, 46] },
+   836→          // Row 4: Additional colors
+   837→          { label: 'Blue',         rgb: [57, 49, 163] },
+   838→          { label: 'Green',        rgb: [70, 148, 73] },
+   839→          { label: 'Red',          rgb: [175, 54, 60] },
+   840→          { label: 'Yellow',       rgb: [231, 199, 31] },
+   841→          // Row 5: High saturation
+   842→          { label: 'Magenta',      rgb: [187, 86, 149] },
+   843→          { label: 'Cyan',         rgb: [0, 135, 142] },
+   844→          // Row 6: Grayscale (6 steps)
+   845→          { label: 'White',        rgb: [243, 243, 242] },
+   846→          { label: 'N8',           rgb: [200, 200, 200] },
+   847→          { label: 'N6.5',         rgb: [160, 160, 160] },
+   848→          { label: 'N5',           rgb: [122, 122, 121] },
+   849→          { label: 'N3.5',         rgb: [85, 85, 85] },
+   850→          { label: 'Black',        rgb: [52, 52, 52] },
+   851→        ];
+   852→
+   853→        const cols = 6;
+   854→        const rows = 4;
+   855→        const pad = Math.round(Math.min(resW, resH) * 0.04); // 四周留白
+   856→        const gap = Math.round(Math.min(resW, resH) * 0.012); // 色块间距
+   857→        const chartW = resW - pad * 2;
+   858→        const chartH = resH - pad * 2;
+   859→        const cellW = (chartW - gap * (cols - 1)) / cols;
+   860→        const cellH = (chartH - gap * (rows - 1)) / rows;
+   861→
+   862→        // 浅灰背景
+   863→        ctx.fillStyle = '#d0d0d0';
+   864→        ctx.fillRect(0, 0, resW, resH);
+   865→
+   866→        patches.forEach(({ label, rgb: [r, g, b] }, i) => {
+   867→          const col = i % cols;
+   868→          const row = Math.floor(i / cols);
+   869→          const x = pad + col * (cellW + gap);
+   870→          const y = pad + row * (cellH + gap);
+   871→
+   872→          // 色块
+   873→          ctx.fillStyle = `rgb(${r},${g},${b})`;
+   874→          ctx.fillRect(x, y, cellW, cellH);
+   875→
+   876→          // 序号 + 名称标注
+   877→          const textColor = getTextColorForBg(r, g, b);
+   878→          const fsNum = Math.max(9, Math.min(cellW / 5, 16));
+   879→          const fsLabel = Math.max(7, Math.min(cellW / 7, 12));
+   880→
+   881→          ctx.textAlign = 'center';
+   882→          ctx.textBaseline = 'middle';
+   883→          const cx = x + cellW / 2;
+   884→          const cy = y + cellH / 2;
+   885→
+   886→          ctx.fillStyle = textColor;
+   887→          ctx.font = `bold ${fsNum}px sans-serif`;
+   888→          ctx.fillText(`${i + 1}`, cx, cy - fsLabel * 0.7);
+   889→          ctx.font = `${fsLabel}px sans-serif`;
+   890→          ctx.fillText(label, cx, cy + fsLabel * 0.7);
+   891→        });
+   892→        break;
+   893→      }
+   894→    }
+   895→
+   896→    setPatternSrc(canvas.toDataURL('image/png'));
+   897→  }, [patternType, resW, resH, graySteps]);
+   898→
+   899→  const handleDownload = useCallback(async () => {
+   900→    if (!patternSrc) return;
+   901→    try {
+   902→      await exportDataUrlAsFormat(
+   903→        patternSrc,
+   904→        `test_pattern_${patternType}_${resW}x${resH}`,
+   905→        patternExportFormat
+   906→      );
+   907→    } catch {
+   908→      // Fallback
+   909→      const a = document.createElement('a');
+   910→      a.href = patternSrc;
+   911→      a.download = `test_pattern_${patternType}_${resW}x${resH}.png`;
+   912→      a.click();
+   913→    }
+   914→  }, [patternSrc, patternType, resW, resH, patternExportFormat]);
+   915→
+   916→  return (
+   917→    <div className="space-y-4">
+   918→      <Card>
+   919→        <CardHeader className="pb-3">
+   920→          <CardTitle className="text-base">RGB 测试图案生成</CardTitle>
+   921→          <CardDescription>生成标准色彩测试图案，用于色彩空间验证和显示校准</CardDescription>
+   922→        </CardHeader>
+   923→        <CardContent className="space-y-4">
+   924→          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+   925→            <div className="space-y-2">
+   926→              <Label className="text-sm font-medium">图案类型</Label>
+   927→              <Select value={patternType} onValueChange={(v) => setPatternType(v as PatternType)}>
+   928→                <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+   929→                <SelectContent>
+   930→                  {PATTERN_OPTIONS.map((opt) => (
+   931→                    <SelectItem key={opt.value} value={opt.value}>
+   932→                      {opt.label}
+   933→                      <span className="ml-1.5 text-[10px] text-muted-foreground">{opt.desc}</span>
+   934→                    </SelectItem>
+   935→                  ))}
+   936→                </SelectContent>
+   937→              </Select>
+   938→            </div>
+   939→            <div className="space-y-2">
+   940→              <Label className="text-sm font-medium">预设分辨率</Label>
+   941→              <Select value={resPreset} onValueChange={handlePresetSelect}>
+   942→                <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+   943→                <SelectContent>
+   944→                  {PRESET_RESOLUTIONS.map((p) => (
+   945→                    <SelectItem key={p.label} value={p.label}>{p.label}</SelectItem>
+   946→                  ))}
+   947→                  <SelectItem value="custom">自定义...</SelectItem>
+   948→                </SelectContent>
+   949→              </Select>
+   950→            </div>
+   951→            {resPreset === 'custom' && (
+   952→              <div className="space-y-2">
+   953→                <Label className="text-sm font-medium">自定义分辨率 (宽 × 高)</Label>
+   954→                <div className="flex items-center gap-1.5">
+   955→                  <Input type="number" min="1" max="8192" value={resW} onChange={(e) => handleCustomW(e.target.value)} className="h-9 text-sm" placeholder="宽" />
+   956→                  <span className="text-muted-foreground text-sm font-medium">×</span>
+   957→                  <Input type="number" min="1" max="8192" value={resH} onChange={(e) => handleCustomH(e.target.value)} className="h-9 text-sm" placeholder="高" />
+   958→                </div>
+   959→              </div>
+   960→            )}
+   961→            {patternType === 'grayscaleSteps' && (
+   962→              <div className="space-y-2">
+   963→                <Label className="text-sm font-medium">灰阶级数</Label>
+   964→                <Input
+   965→                  type="number"
+   966→                  min={2}
+   967→                  max={256}
+   968→                  value={grayStepsInput}
+   969→                  onChange={(e) => {
+   970→                    setGrayStepsInput(e.target.value);
+   971→                    const n = parseInt(e.target.value, 10);
+   972→                    if (!isNaN(n) && n >= 2 && n <= 256) setGraySteps(n);
+   973→                  }}
+   974→                  onBlur={() => {
+   975→                    const n = parseInt(grayStepsInput, 10);
+   976→                    if (isNaN(n) || n < 2) { setGrayStepsInput(String(graySteps)); }
+   977→                    else if (n > 256) { setGraySteps(256); setGrayStepsInput('256'); }
+   978→                    else { setGraySteps(n); setGrayStepsInput(String(n)); }
+   979→                  }}
+   980→                  className="h-9 text-sm"
+   981→                />
+   982→              </div>
+   983→            )}
+   984→            <div className="flex items-end gap-2">
+   985→              <Button onClick={generatePattern} className="gap-1 flex-1">
+   986→                <Play className="h-3.5 w-3.5" /> 生成
+   987→              </Button>
+   988→              <Select value={patternExportFormat} onValueChange={(v) => setPatternExportFormat(v as ExportImageFormat)}>
+   989→                <SelectTrigger className="h-9 w-24 text-xs"><SelectValue /></SelectTrigger>
+   990→                <SelectContent>
+   991→                  {EXPORT_FORMAT_OPTIONS.map((opt) => (
+   992→                    <SelectItem key={opt.value} value={opt.value} className="text-xs">{opt.label}</SelectItem>
+   993→                  ))}
+   994→                </SelectContent>
+   995→              </Select>
+   996→              <Button onClick={handleDownload} disabled={!patternSrc} variant="outline" className="gap-1">
+   997→                <Download className="h-3.5 w-3.5" />
+   998→              </Button>
+   999→            </div>
+  1000→          </div>
+  1001→        </CardContent>
+  1002→      </Card>
+  1003→      <Card>
+  1004→        <CardHeader className="pb-2">
+  1005→          <CardTitle className="text-sm flex items-center gap-2">
+  1006→            预览
+  1007→            {patternSrc && (<Badge variant="secondary" className="text-[10px]">{resW}×{resH}</Badge>)}
+  1008→          </CardTitle>
+  1009→        </CardHeader>
+  1010→        <CardContent className="p-3">
+  1011→          <div className="relative bg-[repeating-conic-gradient(#e5e7eb_0%_25%,#fff_0%_50%)] bg-[length:16px_16px] rounded-md overflow-hidden min-h-[256px] flex items-center justify-center">
+  1012→            <canvas ref={canvasRef} className={`max-w-full max-h-[600px] object-contain ${patternSrc ? '' : 'hidden'}`} />
+  1013→            {!patternSrc && (<p className="text-sm text-muted-foreground">点击"生成"按钮创建测试图案</p>)}
+  1014→            {patternSrc && (<img src={patternSrc} alt="Pattern" className="hidden" aria-hidden="true" />)}
+  1015→          </div>
+  1016→        </CardContent>
+  1017→      </Card>
+  1018→    </div>
+  1019→  );
+  1020→}
+  1021→
+  1022→// ═══════════════════════════════════════════════════════════════════════════════
+  1023→// TAB 3: Value Comparison
+  1024→// ═══════════════════════════════════════════════════════════════════════════════
+  1025→
+  1026→function ValueComparisonTab() {
+  1027→  const [pipelineA, setPipelineA] = useState({ gamut: 'sRGB', tf: 'sRGB' as TransferFunctionName });
+  1028→  const [pipelineB, setPipelineB] = useState({ gamut: 'DCI_P3', tf: 'sRGB' as TransferFunctionName });
+  1029→  const [inputR, setInputR] = useState('0.5');
+  1030→  const [inputG, setInputG] = useState('0.3');
+  1031→  const [inputB, setInputB] = useState('0.8');
+  1032→  const [resultA, setResultA] = useState<PipelineResult | null>(null);
+  1033→  const [resultB, setResultB] = useState<PipelineResult | null>(null);
+  1034→  const [rgbRange, setRgbRange] = useState<'0-1' | '0-255'>('0-1');
+  1035→
+  1036→  const computePipeline = useCallback(
+  1037→    (r: number, g: number, b: number, gamut: string, tf: TransferFunctionName): PipelineResult => {
+  1038→      const xyz = rgbToXYZ(r, g, b, gamut, tf);
+  1039→      const lab = xyzToLab(xyz.X, xyz.Y, xyz.Z);
+  1040→      const xySum = xyz.X + xyz.Y + xyz.Z;
+  1041→      const x = xySum === 0 ? 0.3127 : xyz.X / xySum;
+  1042→      const y = xySum === 0 ? 0.3290 : xyz.Y / xySum;
+  1043→
+  1044→      // Linear values
+  1045→      const linR = Math.pow(Math.max(0, r), 2.2); // approximate
+  1046→      const linG = Math.pow(Math.max(0, g), 2.2);
+  1047→      const linB = Math.pow(Math.max(0, b), 2.2);
+  1048→
+  1049→      // Convert back to RGB in same space for reference
+  1050→      const outRgb = xyzToRgb(xyz.X, xyz.Y, xyz.Z, gamut, tf);
+  1051→
+  1052→      return {
+  1053→        linearR: linR,
+  1054→        linearG: linG,
+  1055→        linearB: linB,
+  1056→        xyzX: xyz.X,
+  1057→        xyzY: xyz.Y,
+  1058→        xyzZ: xyz.Z,
+  1059→        x,
+  1060→        y,
+  1061→        Y: xyz.Y,
+  1062→        labL: lab.L,
+  1063→        labA: lab.a,
+  1064→        labB: lab.b,
+  1065→        outR: outRgb[0],
+  1066→        outG: outRgb[1],
+  1067→        outB: outRgb[2],
+  1068→      };
+  1069→    },
+  1070→    []
+  1071→  );
+  1072→
+  1073→  const handleCompare = useCallback(() => {
+  1074→    const scale = rgbRange === '0-255' ? 1 / 255 : 1;
+  1075→    const r = (parseFloat(inputR) || 0) * scale;
+  1076→    const g = (parseFloat(inputG) || 0) * scale;
+  1077→    const b = (parseFloat(inputB) || 0) * scale;
+  1078→
+  1079→    const a = computePipeline(r, g, b, pipelineA.gamut, pipelineA.tf);
+  1080→    const bResult = computePipeline(r, g, b, pipelineB.gamut, pipelineB.tf);
+  1081→
+  1082→    setResultA(a);
+  1083→    setResultB(bResult);
+  1084→  }, [inputR, inputG, inputB, pipelineA, pipelineB, computePipeline, rgbRange]);
+  1085→
+  1086→  const handleRangeSwitch = useCallback((newRange: '0-1' | '0-255') => {
+  1087→    const oldScale = rgbRange === '0-255' ? 255 : 1;
+  1088→    const newScale = newRange === '0-255' ? 255 : 1;
+  1089→    const r = (parseFloat(inputR) || 0) / oldScale * newScale;
+  1090→    const g = (parseFloat(inputG) || 0) / oldScale * newScale;
+  1091→    const b = (parseFloat(inputB) || 0) / oldScale * newScale;
+  1092→    setInputR(r.toFixed(newRange === '0-255' ? 0 : 4));
+  1093→    setInputG(g.toFixed(newRange === '0-255' ? 0 : 4));
+  1094→    setInputB(b.toFixed(newRange === '0-255' ? 0 : 4));
+  1095→    setRgbRange(newRange);
+  1096→  }, [rgbRange, inputR, inputG, inputB]);
+  1097→
+  1098→  const fmt = (n: number, digits = 6) => Number(n).toFixed(digits);
+  1099→
+  1100→  const renderPipelineCard = (
+  1101→    title: string,
+  1102→    pipeline: { gamut: string; tf: TransferFunctionName },
+  1103→    setPipeline: (p: { gamut: string; tf: TransferFunctionName }) => void,
+  1104→    result: PipelineResult | null,
+  1105→    rgbHex: string
+  1106→  ) => (
+  1107→    <Card className="flex-1 min-w-[320px]">
+  1108→      <CardHeader className="pb-2">
+  1109→        <CardTitle className="text-sm flex items-center gap-2">{title}</CardTitle>
+  1110→        <div className="grid grid-cols-2 gap-2 pt-1">
+  1111→          <Select value={pipeline.gamut} onValueChange={(v) => setPipeline({ ...pipeline, gamut: v })}>
+  1112→            <SelectTrigger className="h-8 text-xs">
+  1113→              <SelectValue />
+  1114→            </SelectTrigger>
+  1115→            <SelectContent>
+  1116→              {gamutNames.map((g) => (
+  1117→                <SelectItem key={g} value={g}>
+  1118→                  {STANDARD_GAMUTS[g]?.name || g}
+  1119→                </SelectItem>
+  1120→              ))}
+  1121→            </SelectContent>
+  1122→          </Select>
+  1123→          <Select value={pipeline.tf} onValueChange={(v) => setPipeline({ ...pipeline, tf: v as TransferFunctionName })}>
+  1124→            <SelectTrigger className="h-8 text-xs">
+  1125→              <SelectValue />
+  1126→            </SelectTrigger>
+  1127→            <SelectContent>
+  1128→              {tfNames.map((tf) => (
+  1129→                <SelectItem key={tf} value={tf}>
+  1130→                  {tf}
+  1131→                </SelectItem>
+  1132→              ))}
+  1133→            </SelectContent>
+  1134→          </Select>
+  1135→        </div>
+  1136→      </CardHeader>
+  1137→      <CardContent className="space-y-3">
+  1138→        {result ? (
+  1139→          <>
+  1140→            {/* Color swatch */}
+  1141→            <div
+  1142→              className="h-12 rounded-md border"
+  1143→              style={{ backgroundColor: rgbHex }}
+  1144→            />
+  1145→
+  1146→            <div className="space-y-1.5 text-xs">
+  1147→              <div className="grid grid-cols-3 gap-2">
+  1148→                <div>
+  1149→                  <span className="text-muted-foreground">Linear R:</span>
+  1150→                  <p className="font-mono">{fmt(result.linearR)}</p>
+  1151→                </div>
+  1152→                <div>
+  1153→                  <span className="text-muted-foreground">Linear G:</span>
+  1154→                  <p className="font-mono">{fmt(result.linearG)}</p>
+  1155→                </div>
+  1156→                <div>
+  1157→                  <span className="text-muted-foreground">Linear B:</span>
+  1158→                  <p className="font-mono">{fmt(result.linearB)}</p>
+  1159→                </div>
+  1160→              </div>
+  1161→
+  1162→              <Separator />
+  1163→
+  1164→              <div className="grid grid-cols-3 gap-2">
+  1165→                <div>
+  1166→                  <span className="text-muted-foreground">XYZ X:</span>
+  1167→                  <p className="font-mono">{fmt(result.xyzX)}</p>
+  1168→                </div>
+  1169→                <div>
+  1170→                  <span className="text-muted-foreground">XYZ Y:</span>
+  1171→                  <p className="font-mono">{fmt(result.xyzY)}</p>
+  1172→                </div>
+  1173→                <div>
+  1174→                  <span className="text-muted-foreground">XYZ Z:</span>
+  1175→                  <p className="font-mono">{fmt(result.xyzZ)}</p>
+  1176→                </div>
+  1177→              </div>
+  1178→
+  1179→              <Separator />
+  1180→
+  1181→              <div className="grid grid-cols-3 gap-2">
+  1182→                <div>
+  1183→                  <span className="text-muted-foreground">x:</span>
+  1184→                  <p className="font-mono">{fmt(result.x, 4)}</p>
+  1185→                </div>
+  1186→                <div>
+  1187→                  <span className="text-muted-foreground">y:</span>
+  1188→                  <p className="font-mono">{fmt(result.y, 4)}</p>
+  1189→                </div>
+  1190→                <div>
+  1191→                  <span className="text-muted-foreground">Y:</span>
+  1192→                  <p className="font-mono">{fmt(result.Y, 4)}</p>
+  1193→                </div>
+  1194→              </div>
+  1195→
+  1196→              <Separator />
+  1197→
+  1198→              <div className="grid grid-cols-3 gap-2">
+  1199→                <div>
+  1200→                  <span className="text-muted-foreground">L*:</span>
+  1201→                  <p className="font-mono">{fmt(result.labL, 2)}</p>
+  1202→                </div>
+  1203→                <div>
+  1204→                  <span className="text-muted-foreground">a*:</span>
+  1205→                  <p className="font-mono">{fmt(result.labA, 2)}</p>
+  1206→                </div>
+  1207→                <div>
+  1208→                  <span className="text-muted-foreground">b*:</span>
+  1209→                  <p className="font-mono">{fmt(result.labB, 2)}</p>
+  1210→                </div>
+  1211→              </div>
+  1212→            </div>
+  1213→          </>
+  1214→        ) : (
+  1215→          <p className="text-xs text-muted-foreground text-center py-4">
+  1216→            点击"对比"查看结果
+  1217→          </p>
+  1218→        )}
+  1219→      </CardContent>
+  1220→    </Card>
+  1221→  );
+  1222→
+  1223→  const colorA = resultA
+  1224→    ? `rgb(${Math.round(resultA.outR * 255)},${Math.round(resultA.outG * 255)},${Math.round(resultA.outB * 255)})`
+  1225→    : '#808080';
+  1226→  const colorB = resultB
+  1227→    ? `rgb(${Math.round(resultB.outR * 255)},${Math.round(resultB.outG * 255)},${Math.round(resultB.outB * 255)})`
+  1228→    : '#808080';
+  1229→
+  1230→  return (
+  1231→    <div className="space-y-4">
+  1232→      <Card>
+  1233→        <CardHeader className="pb-3">
+  1234→          <CardTitle className="text-base">色彩通路数值对比</CardTitle>
+  1235→          <CardDescription>对比同一输入值在不同色彩空间通路下的转换结果</CardDescription>
+  1236→        </CardHeader>
+  1237→        <CardContent className="space-y-4">
+  1238→          <div className="space-y-2">
+  1239→            <div className="flex items-center gap-2">
+  1240→              <Label className="text-sm font-medium">输入 RGB</Label>
+  1241→              <div className="flex rounded-md border overflow-hidden h-6">
+  1242→                <button
+  1243→                  type="button"
+  1244→                  className={`px-2 text-[10px] font-medium transition-colors ${rgbRange === '0-1' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'}`}
+  1245→                  onClick={() => handleRangeSwitch('0-1')}
+  1246→                >0-1</button>
+  1247→                <button
+  1248→                  type="button"
+  1249→                  className={`px-2 text-[10px] font-medium transition-colors ${rgbRange === '0-255' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'}`}
+  1250→                  onClick={() => handleRangeSwitch('0-255')}
+  1251→                >0-255</button>
+  1252→              </div>
+  1253→            </div>
+  1254→            <div className="grid grid-cols-3 gap-2 max-w-xs">
+  1255→              <div>
+  1256→                <Label className="text-[10px] text-muted-foreground">R</Label>
+  1257→                <Input
+  1258→                  type="number"
+  1259→                  min="0"
+  1260→                  max={rgbRange === '0-255' ? '255' : '1'}
+  1261→                  step={rgbRange === '0-255' ? '1' : '0.01'}
+  1262→                  value={inputR}
+  1263→                  onChange={(e) => setInputR(e.target.value)}
+  1264→                  className="h-8"
+  1265→                />
+  1266→              </div>
+  1267→              <div>
+  1268→                <Label className="text-[10px] text-muted-foreground">G</Label>
+  1269→                <Input
+  1270→                  type="number"
+  1271→                  min="0"
+  1272→                  max={rgbRange === '0-255' ? '255' : '1'}
+  1273→                  step={rgbRange === '0-255' ? '1' : '0.01'}
+  1274→                  value={inputG}
+  1275→                  onChange={(e) => setInputG(e.target.value)}
+  1276→                  className="h-8"
+  1277→                />
+  1278→              </div>
+  1279→              <div>
+  1280→                <Label className="text-[10px] text-muted-foreground">B</Label>
+  1281→                <Input
+  1282→                  type="number"
+  1283→                  min="0"
+  1284→                  max={rgbRange === '0-255' ? '255' : '1'}
+  1285→                  step={rgbRange === '0-255' ? '1' : '0.01'}
+  1286→                  value={inputB}
+  1287→                  onChange={(e) => setInputB(e.target.value)}
+  1288→                  className="h-8"
+  1289→                />
+  1290→              </div>
+  1291→            </div>
+  1292→          </div>
+  1293→
+  1294→          <Button onClick={handleCompare} className="gap-1">
+  1295→            <GitCompare className="h-3.5 w-3.5" />
+  1296→            对比
+  1297→          </Button>
+  1298→        </CardContent>
+  1299→      </Card>
+  1300→
+  1301→      {/* Pipeline comparison */}
+  1302→      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+  1303→        {renderPipelineCard('Pipeline A', pipelineA, setPipelineA, resultA, colorA)}
+  1304→        {renderPipelineCard('Pipeline B', pipelineB, setPipelineB, resultB, colorB)}
+  1305→      </div>
+  1306→
+  1307→      {/* Difference highlights */}
+  1308→      {resultA && resultB && (
+  1309→        <Card>
+  1310→          <CardHeader className="pb-2">
+  1311→            <CardTitle className="text-sm">差异分析</CardTitle>
+  1312→          </CardHeader>
+  1313→          <CardContent>
+  1314→            <Table>
+  1315→              <TableHeader>
+  1316→                <TableRow>
+  1317→                  <TableHead className="text-xs">参数</TableHead>
+  1318→                  <TableHead className="text-xs">Pipeline A</TableHead>
+  1319→                  <TableHead className="text-xs">Pipeline B</TableHead>
+  1320→                  <TableHead className="text-xs">差值</TableHead>
+  1321→                </TableRow>
+  1322→              </TableHeader>
+  1323→              <TableBody className="text-xs">
+  1324→                {[
+  1325→                  { name: 'XYZ X', a: resultA.xyzX, b: resultB.xyzX },
+  1326→                  { name: 'XYZ Y', a: resultA.xyzY, b: resultB.xyzY },
+  1327→                  { name: 'XYZ Z', a: resultA.xyzZ, b: resultB.xyzZ },
+  1328→                  { name: 'x', a: resultA.x, b: resultB.x },
+  1329→                  { name: 'y', a: resultA.y, b: resultB.y },
+  1330→                  { name: 'L*', a: resultA.labL, b: resultB.labL },
+  1331→                  { name: 'a*', a: resultA.labA, b: resultB.labA },
+  1332→                  { name: 'b*', a: resultA.labB, b: resultB.labB },
+  1333→                ].map((row) => {
+  1334→                  const diff = Math.abs(row.a - row.b);
+  1335→                  const intensity = Math.min(1, diff * 50);
+  1336→                  return (
+  1337→                    <TableRow key={row.name}>
+  1338→                      <TableCell className="font-medium">{row.name}</TableCell>
+  1339→                      <TableCell className="font-mono">{fmt(row.a, 4)}</TableCell>
+  1340→                      <TableCell className="font-mono">{fmt(row.b, 4)}</TableCell>
+  1341→                      <TableCell>
+  1342→                        <Badge
+  1343→                          variant="outline"
+  1344→                          style={{
+  1345→                            borderColor: diff > 0.01 ? '#ef4444' : diff > 0.001 ? '#f97316' : '#22c55e',
+  1346→                            color: diff > 0.01 ? '#ef4444' : diff > 0.001 ? '#f97316' : '#22c55e',
+  1347→                          }}
+  1348→                        >
+  1349→                          {fmt(diff, 6)}
+  1350→                        </Badge>
+  1351→                      </TableCell>
+  1352→                    </TableRow>
+  1353→                  );
+  1354→                })}
+  1355→              </TableBody>
+  1356→            </Table>
+  1357→          </CardContent>
+  1358→        </Card>
+  1359→      )}
+  1360→    </div>
+  1361→  );
+  1362→}
+  1363→
+  1364→// ═══════════════════════════════════════════════════════════════════════════════
+  1365→// TAB 4: Error Assessment
+  1366→// ═══════════════════════════════════════════════════════════════════════════════
+  1367→
+  1368→function ErrorAssessmentTab() {
+  1369→  const [refR, setRefR] = useState('0.8');
+  1370→  const [refG, setRefG] = useState('0.4');
+  1371→  const [refB, setRefB] = useState('0.2');
+  1372→  const [testR, setTestR] = useState('0.75');
+  1373→  const [testG, setTestG] = useState('0.42');
+  1374→  const [testB, setTestB] = useState('0.22');
+  1375→  const [method, setMethod] = useState<'76' | '94' | '2000'>('2000');
+  1376→  const [autoConvert, setAutoConvert] = useState(false);
+  1377→  const [autoGamut, setAutoGamut] = useState('DCI_P3');
+  1378→  const [rgbRange, setRgbRange] = useState<'0-1' | '0-255'>('0-1');
+  1379→  const [currentResult, setCurrentResult] = useState<{
+  1380→    deltaE: number;
+  1381→    lab1: { L: number; a: number; b: number };
+  1382→    lab2: { L: number; a: number; b: number };
+  1383→    interpretation: ReturnType<typeof interpretDeltaE>;
+  1384→  } | null>(null);
+  1385→  const [batch, setBatch] = useState<DeltaEBatchEntry[]>([]);
+  1386→  const nextIdRef = useRef(1);
+  1387→
+  1388→  const rgbScale = rgbRange === '0-255' ? 1 / 255 : 1;
+  1389→
+  1390→  const handleRangeSwitch = useCallback((newRange: '0-1' | '0-255') => {
+  1391→    const oldScale = rgbRange === '0-255' ? 255 : 1;
+  1392→    const newScale = newRange === '0-255' ? 255 : 1;
+  1393→    const fmt = (v: string) => {
+  1394→      const n = (parseFloat(v) || 0) / oldScale * newScale;
+  1395→      return newRange === '0-255' ? n.toFixed(0) : n.toFixed(4);
+  1396→    };
+  1397→    setRefR(fmt(refR)); setRefG(fmt(refG)); setRefB(fmt(refB));
+  1398→    setTestR(fmt(testR)); setTestG(fmt(testG)); setTestB(fmt(testB));
+  1399→    setRgbRange(newRange);
+  1400→  }, [rgbRange, refR, refG, refB, testR, testG, testB]);
+  1401→
+  1402→  const handleCalculate = useCallback(() => {
+  1403→    try {
+  1404→      let rr = (parseFloat(refR) || 0) * rgbScale;
+  1405→      let rg = (parseFloat(refG) || 0) * rgbScale;
+  1406→      let rb = (parseFloat(refB) || 0) * rgbScale;
+  1407→
+  1408→      let tr = (parseFloat(testR) || 0) * rgbScale;
+  1409→      let tg = (parseFloat(testG) || 0) * rgbScale;
+  1410→      let tb = (parseFloat(testB) || 0) * rgbScale;
+  1411→
+  1412→      // Clamp to 0-1
+  1413→      rr = Math.max(0, Math.min(1, rr));
+  1414→      rg = Math.max(0, Math.min(1, rg));
+  1415→      rb = Math.max(0, Math.min(1, rb));
+  1416→
+  1417→      // If auto-convert, convert the reference through a pipeline to get test
+  1418→      if (autoConvert) {
+  1419→        const xyz = rgbToXYZ(rr, rg, rb, 'sRGB', 'sRGB');
+  1420→        const [outR, outG, outB] = xyzToRgb(xyz.X, xyz.Y, xyz.Z, autoGamut, 'sRGB');
+  1421→        tr = Math.max(0, Math.min(1, outR));
+  1422→        tg = Math.max(0, Math.min(1, outG));
+  1423→        tb = Math.max(0, Math.min(1, outB));
+  1424→      }
+  1425→
+  1426→      tr = Math.max(0, Math.min(1, tr));
+  1427→      tg = Math.max(0, Math.min(1, tg));
+  1428→      tb = Math.max(0, Math.min(1, tb));
+  1429→
+  1430→      // Convert to XYZ using sRGB as reference
+  1431→      const xyz1 = rgbToXYZ(rr, rg, rb, 'sRGB', 'sRGB');
+  1432→      const xyz2 = rgbToXYZ(tr, tg, tb, 'sRGB', 'sRGB');
+  1433→      const lab1 = xyzToLab(xyz1.X, xyz1.Y, xyz1.Z);
+  1434→      const lab2 = xyzToLab(xyz2.X, xyz2.Y, xyz2.Z);
+  1435→
+  1436→      let dE: number;
+  1437→      switch (method) {
+  1438→        case '76':
+  1439→          dE = deltaE76(lab1, lab2);
+  1440→          break;
+  1441→        case '94':
+  1442→          dE = deltaE94(lab1, lab2);
+  1443→          break;
+  1444→        case '2000':
+  1445→          dE = deltaE2000(lab1, lab2);
+  1446→          break;
+  1447→      }
+  1448→
+  1449→      const interpretation = interpretDeltaE(dE);
+  1450→      setCurrentResult({ deltaE: dE, lab1, lab2, interpretation });
+  1451→    } catch (err) {
+  1452→      console.error('Delta E calculation error:', err);
+  1453→    }
+  1454→  }, [refR, refG, refB, testR, testG, testB, method, autoConvert, autoGamut, rgbScale]);
+  1455→
+  1456→  const handleAddToBatch = useCallback(() => {
+  1457→    if (!currentResult) return;
+  1458→    const entry: DeltaEBatchEntry = {
+  1459→      id: nextIdRef.current++,
+  1460→      refR: (parseFloat(refR) || 0) * rgbScale,
+  1461→      refG: (parseFloat(refG) || 0) * rgbScale,
+  1462→      refB: (parseFloat(refB) || 0) * rgbScale,
+  1463→      testR: (parseFloat(testR) || 0) * rgbScale,
+  1464→      testG: (parseFloat(testG) || 0) * rgbScale,
+  1465→      testB: (parseFloat(testB) || 0) * rgbScale,
+  1466→      deltaE: currentResult.deltaE,
+  1467→      method,
+  1468→      lab1: currentResult.lab1,
+  1469→      lab2: currentResult.lab2,
+  1470→      interpretation: currentResult.interpretation,
+  1471→    };
+  1472→    setBatch((prev) => [...prev, entry]);
+  1473→  }, [currentResult, refR, refG, refB, testR, testG, testB, method, rgbScale]);
+  1474→
+  1475→  const handleClearBatch = useCallback(() => {
+  1476→    setBatch([]);
+  1477→  }, []);
+  1478→
+  1479→  const handleRemoveFromBatch = useCallback((id: number) => {
+  1480→    setBatch((prev) => prev.filter((e) => e.id !== id));
+  1481→  }, []);
+  1482→
+  1483→  // Statistics
+  1484→  const stats = batch.length > 0 ? deltaEStatistics(batch.map((e) => e.deltaE)) : null;
+  1485→
+  1486→  // Distribution chart data
+  1487→  const distributionData = (() => {
+  1488→    if (batch.length === 0) return [];
+  1489→    const ranges = [
+  1490→      { label: '< 1', min: 0, max: 1 },
+  1491→      { label: '1-2', min: 1, max: 2 },
+  1492→      { label: '2-3.5', min: 2, max: 3.5 },
+  1493→      { label: '3.5-5', min: 3.5, max: 5 },
+  1494→      { label: '> 5', min: 5, max: Infinity },
+  1495→    ];
+  1496→    return ranges.map((r) => ({
+  1497→      range: r.label,
+  1498→      count: batch.filter((e) => e.deltaE >= r.min && e.deltaE < r.max).length,
+  1499→      fill: r.label === '< 1' ? '#22c55e' : r.label === '1-2' ? '#84cc16' : r.label === '2-3.5' ? '#eab308' : r.label === '3.5-5' ? '#f97316' : '#ef4444',
+  1500→    }));
+  1501→  })();
+  1502→
+  1503→  const rgbToHex = (r: number, g: number, b: number) => {
+  1504→    const toHex = (v: number) => Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, '0');
+  1505→    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+  1506→  };
+  1507→
+  1508→  return (
+  1509→    <div className="space-y-4">
+  1510→      {/* Input controls */}
+  1511→      <Card>
+  1512→        <CardHeader className="pb-3">
+  1513→          <CardTitle className="text-base">色差计算 (Delta E)</CardTitle>
+  1514→          <CardDescription>计算两个颜色之间的感知差异</CardDescription>
+  1515→        </CardHeader>
+  1516→        <CardContent className="space-y-4">
+  1517→          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+  1518→            {/* Reference color */}
+  1519→            <div className="space-y-2">
+  1520→              <div className="flex items-center gap-2">
+  1521→                <Label className="text-sm font-medium">参考颜色 (RGB)</Label>
+  1522→                <div className="flex rounded-md border overflow-hidden h-6">
+  1523→                  <button
+  1524→                    type="button"
+  1525→                    className={`px-2 text-[10px] font-medium transition-colors ${rgbRange === '0-1' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'}`}
+  1526→                    onClick={() => handleRangeSwitch('0-1')}
+  1527→                  >0-1</button>
+  1528→                  <button
+  1529→                    type="button"
+  1530→                    className={`px-2 text-[10px] font-medium transition-colors ${rgbRange === '0-255' ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/80'}`}
+  1531→                    onClick={() => handleRangeSwitch('0-255')}
+  1532→                  >0-255</button>
+  1533→                </div>
+  1534→              </div>
+  1535→              <div className="grid grid-cols-3 gap-2">
+  1536→                <div>
+  1537→                  <Label className="text-[10px] text-muted-foreground">R</Label>
+  1538→                  <Input type="number" min="0" max={rgbRange === '0-255' ? '255' : '1'} step={rgbRange === '0-255' ? '1' : '0.01'} value={refR} onChange={(e) => setRefR(e.target.value)} className="h-8" />
+  1539→                </div>
+  1540→                <div>
+  1541→                  <Label className="text-[10px] text-muted-foreground">G</Label>
+  1542→                  <Input type="number" min="0" max={rgbRange === '0-255' ? '255' : '1'} step={rgbRange === '0-255' ? '1' : '0.01'} value={refG} onChange={(e) => setRefG(e.target.value)} className="h-8" />
+  1543→                </div>
+  1544→                <div>
+  1545→                  <Label className="text-[10px] text-muted-foreground">B</Label>
+  1546→                  <Input type="number" min="0" max={rgbRange === '0-255' ? '255' : '1'} step={rgbRange === '0-255' ? '1' : '0.01'} value={refB} onChange={(e) => setRefB(e.target.value)} className="h-8" />
+  1547→                </div>
+  1548→              </div>
+  1549→            </div>
+  1550→
+  1551→            {/* Test color */}
+  1552→            <div className="space-y-2">
+  1553→              <div className="flex items-center justify-between">
+  1554→                <Label className="text-sm font-medium">测试颜色 (RGB)</Label>
+  1555→                <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+  1556→                  <input
+  1557→                    type="checkbox"
+  1558→                    checked={autoConvert}
+  1559→                    onChange={(e) => setAutoConvert(e.target.checked)}
+  1560→                    className="rounded"
+  1561→                  />
+  1562→                  自动转换
+  1563→                </label>
+  1564→              </div>
+  1565→              <div className="grid grid-cols-3 gap-2">
+  1566→                <div>
+  1567→                  <Label className="text-[10px] text-muted-foreground">R</Label>
+  1568→                  <Input type="number" min="0" max={rgbRange === '0-255' ? '255' : '1'} step={rgbRange === '0-255' ? '1' : '0.01'} value={testR} onChange={(e) => setTestR(e.target.value)} className="h-8" disabled={autoConvert} />
+  1569→                </div>
+  1570→                <div>
+  1571→                  <Label className="text-[10px] text-muted-foreground">G</Label>
+  1572→                  <Input type="number" min="0" max={rgbRange === '0-255' ? '255' : '1'} step={rgbRange === '0-255' ? '1' : '0.01'} value={testG} onChange={(e) => setTestG(e.target.value)} className="h-8" disabled={autoConvert} />
+  1573→                </div>
+  1574→                <div>
+  1575→                  <Label className="text-[10px] text-muted-foreground">B</Label>
+  1576→                  <Input type="number" min="0" max={rgbRange === '0-255' ? '255' : '1'} step={rgbRange === '0-255' ? '1' : '0.01'} value={testB} onChange={(e) => setTestB(e.target.value)} className="h-8" disabled={autoConvert} />
+  1577→                </div>
+  1578→              </div>
+  1579→              {autoConvert && (
+  1580→                <Select value={autoGamut} onValueChange={setAutoGamut} className="mt-1">
+  1581→                  <SelectTrigger className="h-8 text-xs">
+  1582→                    <SelectValue placeholder="转换色域" />
+  1583→                  </SelectTrigger>
+  1584→                  <SelectContent>
+  1585→                    {gamutNames.map((g) => (
+  1586→                      <SelectItem key={g} value={g}>
+  1587→                        {STANDARD_GAMUTS[g]?.name || g}
+  1588→                      </SelectItem>
+  1589→                    ))}
+  1590→                  </SelectContent>
+  1591→                </Select>
+  1592→              )}
+  1593→            </div>
+  1594→          </div>
+  1595→
+  1596→          {/* Method selector & Calculate */}
+  1597→          <div className="flex flex-wrap items-end gap-3">
+  1598→            <div className="space-y-2">
+  1599→              <Label className="text-sm font-medium">计算方法</Label>
+  1600→              <Select value={method} onValueChange={(v) => setMethod(v as '76' | '94' | '2000')}>
+  1601→                <SelectTrigger className="h-9 w-40">
+  1602→                  <SelectValue />
+  1603→                </SelectTrigger>
+  1604→                <SelectContent>
+  1605→                  <SelectItem value="76">ΔE76 (CIE76)</SelectItem>
+  1606→                  <SelectItem value="94">ΔE94 (CIEDE94)</SelectItem>
+  1607→                  <SelectItem value="2000">ΔE2000 (CIEDE2000)</SelectItem>
+  1608→                </SelectContent>
+  1609→              </Select>
+  1610→            </div>
+  1611→            <Button onClick={handleCalculate} className="gap-1">
+  1612→              <BarChart3 className="h-3.5 w-3.5" />
+  1613→              计算
+  1614→            </Button>
+  1615→          </div>
+  1616→        </CardContent>
+  1617→      </Card>
+  1618→
+  1619→      {/* Current result */}
+  1620→      {currentResult && (
+  1621→        <Card>
+  1622→          <CardHeader className="pb-2">
+  1623→            <div className="flex items-center justify-between">
+  1624→              <CardTitle className="text-sm">计算结果</CardTitle>
+  1625→              <Button size="sm" variant="outline" onClick={handleAddToBatch} className="gap-1 h-7 text-xs">
+  1626→                <Plus className="h-3 w-3" />
+  1627→                加入批次
+  1628→              </Button>
+  1629→            </div>
+  1630→          </CardHeader>
+  1631→          <CardContent className="space-y-3">
+  1632→            {/* Delta E display */}
+  1633→            <div className="flex items-center gap-4">
+  1634→              <div className="text-center">
+  1635→                <div
+  1636→                  className="text-4xl font-bold"
+  1637→                  style={{ color: currentResult.interpretation.color }}
+  1638→                >
+  1639→                  {currentResult.deltaE.toFixed(3)}
+  1640→                </div>
+  1641→                <Badge
+  1642→                  variant="outline"
+  1643→                  className="mt-1"
+  1644→                  style={{
+  1645→                    borderColor: currentResult.interpretation.color,
+  1646→                    color: currentResult.interpretation.color,
+  1647→                  }}
+  1648→                >
+  1649→                  {currentResult.interpretation.level}
+  1650→                </Badge>
+  1651→                <p className="text-[10px] text-muted-foreground mt-1">
+  1652→                  {currentResult.interpretation.description}
+  1653→                </p>
+  1654→              </div>
+  1655→            </div>
+  1656→
+  1657→            {/* Color swatches and Lab values */}
+  1658→            <div className="grid grid-cols-2 gap-4">
+  1659→              <div className="space-y-2">
+  1660→                <Label className="text-xs font-medium">参考颜色</Label>
+  1661→                <div className="flex items-center gap-3">
+  1662→                  <div
+  1663→                    className="w-16 h-16 rounded-md border shrink-0"
+  1664→                    style={{ backgroundColor: rgbToHex(parseFloat(refR), parseFloat(refG), parseFloat(refB)) }}
+  1665→                  />
+  1666→                  <div className="text-xs font-mono space-y-0.5">
+  1667→                    <p>L*: {currentResult.lab1.L.toFixed(2)}</p>
+  1668→                    <p>a*: {currentResult.lab1.a.toFixed(2)}</p>
+  1669→                    <p>b*: {currentResult.lab1.b.toFixed(2)}</p>
+  1670→                  </div>
+  1671→                </div>
+  1672→              </div>
+  1673→              <div className="space-y-2">
+  1674→                <Label className="text-xs font-medium">测试颜色</Label>
+  1675→                <div className="flex items-center gap-3">
+  1676→                  <div
+  1677→                    className="w-16 h-16 rounded-md border shrink-0"
+  1678→                    style={{ backgroundColor: rgbToHex(parseFloat(testR), parseFloat(testG), parseFloat(testB)) }}
+  1679→                  />
+  1680→                  <div className="text-xs font-mono space-y-0.5">
+  1681→                    <p>L*: {currentResult.lab2.L.toFixed(2)}</p>
+  1682→                    <p>a*: {currentResult.lab2.a.toFixed(2)}</p>
+  1683→                    <p>b*: {currentResult.lab2.b.toFixed(2)}</p>
+  1684→                  </div>
+  1685→                </div>
+  1686→              </div>
+  1687→            </div>
+  1688→          </CardContent>
+  1689→        </Card>
+  1690→      )}
+  1691→
+  1692→      {/* Batch results */}
+  1693→      {batch.length > 0 && (
+  1694→        <>
+  1695→          {/* Statistics */}
+  1696→          <Card>
+  1697→            <CardHeader className="pb-2">
+  1698→              <div className="flex items-center justify-between">
+  1699→                <CardTitle className="text-sm">
+  1700→                  批次统计
+  1701→                  <Badge variant="secondary" className="ml-2 text-[10px]">
+  1702→                    {batch.length} 个样本
+  1703→                  </Badge>
+  1704→                </CardTitle>
+  1705→                <Button size="sm" variant="ghost" onClick={handleClearBatch} className="h-7 text-xs text-destructive gap-1">
+  1706→                  <Trash2 className="h-3 w-3" />
+  1707→                  清空
+  1708→                </Button>
+  1709→              </div>
+  1710→            </CardHeader>
+  1711→            <CardContent className="space-y-4">
+  1712→              {stats && (
+  1713→                <>
+  1714→                  {/* Stats grid */}
+  1715→                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+  1716→                    {[
+  1717→                      { label: 'Mean ΔE', value: stats.mean },
+  1718→                      { label: 'Median', value: stats.median },
+  1719→                      { label: 'Max ΔE', value: stats.max },
+  1720→                      { label: 'Min ΔE', value: stats.min },
+  1721→                      { label: 'Std Dev', value: stats.stdDev },
+  1722→                      { label: 'P95', value: stats.p95 },
+  1723→                      { label: 'P99', value: stats.p99 },
+  1724→                      { label: 'Samples', value: batch.length, isInt: true },
+  1725→                    ].map((s) => (
+  1726→                      <div key={s.label} className="bg-muted/50 rounded-md p-2.5 text-center">
+  1727→                        <p className="text-[10px] text-muted-foreground">{s.label}</p>
+  1728→                        <p className="text-sm font-bold font-mono">
+  1729→                          {s.isInt ? s.value : (s.value as number).toFixed(3)}
+  1730→                        </p>
+  1731→                      </div>
+  1732→                    ))}
+  1733→                  </div>
+  1734→
+  1735→                  {/* Distribution chart */}
+  1736→                  <div className="h-48">
+  1737→                    <ResponsiveContainer width="100%" height="100%">
+  1738→                      <BarChart data={distributionData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+  1739→                        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+  1740→                        <XAxis dataKey="range" tick={{ fontSize: 11 }} />
+  1741→                        <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+  1742→                        <Tooltip />
+  1743→                        <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+  1744→                          {distributionData.map((entry, index) => (
+  1745→                            <Cell key={index} fill={entry.fill} />
+  1746→                          ))}
+  1747→                        </Bar>
+  1748→                      </BarChart>
+  1749→                    </ResponsiveContainer>
+  1750→                  </div>
+  1751→                </>
+  1752→              )}
+  1753→
+  1754→              {/* Batch table */}
+  1755→              <div className="max-h-64 overflow-y-auto rounded-md border">
+  1756→                <Table>
+  1757→                  <TableHeader>
+  1758→                    <TableRow>
+  1759→                      <TableHead className="text-[10px] w-8">#</TableHead>
+  1760→                      <TableHead className="text-[10px]">参考 RGB</TableHead>
+  1761→                      <TableHead className="text-[10px]">测试 RGB</TableHead>
+  1762→                      <TableHead className="text-[10px]">方法</TableHead>
+  1763→                      <TableHead className="text-[10px]">ΔE</TableHead>
+  1764→                      <TableHead className="text-[10px]">等级</TableHead>
+  1765→                      <TableHead className="text-[10px] w-8"></TableHead>
+  1766→                    </TableRow>
+  1767→                  </TableHeader>
+  1768→                  <TableBody className="text-xs">
+  1769→                    {batch.map((entry, idx) => (
+  1770→                      <TableRow key={entry.id}>
+  1771→                        <TableCell className="font-mono">{idx + 1}</TableCell>
+  1772→                        <TableCell className="font-mono">
+  1773→                          ({entry.refR.toFixed(2)}, {entry.refG.toFixed(2)}, {entry.refB.toFixed(2)})
+  1774→                        </TableCell>
+  1775→                        <TableCell className="font-mono">
+  1776→                          ({entry.testR.toFixed(2)}, {entry.testG.toFixed(2)}, {entry.testB.toFixed(2)})
+  1777→                        </TableCell>
+  1778→                        <TableCell>ΔE{entry.method}</TableCell>
+  1779→                        <TableCell className="font-bold" style={{ color: entry.interpretation.color }}>
+  1780→                          {entry.deltaE.toFixed(3)}
+  1781→                        </TableCell>
+  1782→                        <TableCell>
+  1783→                          <Badge
+  1784→                            variant="outline"
+  1785→                            className="text-[10px]"
+  1786→                            style={{ borderColor: entry.interpretation.color, color: entry.interpretation.color }}
+  1787→                          >
+  1788→                            {entry.interpretation.level}
+  1789→                          </Badge>
+  1790→                        </TableCell>
+  1791→                        <TableCell>
+  1792→                          <Button
+  1793→                            variant="ghost"
+  1794→                            size="icon"
+  1795→                            className="h-6 w-6"
+  1796→                            onClick={() => handleRemoveFromBatch(entry.id)}
+  1797→                          >
+  1798→                            <Trash2 className="h-3 w-3 text-muted-foreground" />
+  1799→                          </Button>
+  1800→                        </TableCell>
+  1801→                      </TableRow>
+  1802→                    ))}
+  1803→                  </TableBody>
+  1804→                </Table>
+  1805→              </div>
+  1806→            </CardContent>
+  1807→          </Card>
+  1808→        </>
+  1809→      )}
+  1810→    </div>
+  1811→  );
+  1812→}
+  1813→
+  1814→// ═══════════════════════════════════════════════════════════════════════════════
+  1815→// TAB 5: Results Report
+  1816→// ═══════════════════════════════════════════════════════════════════════════════
+  1817→
+  1818→function ResultsReportTab() {
+  1819→  const [report, setReport] = useState('');
+  1820→  const [copied, setCopied] = useState(false);
+  1821→
+  1822→  // This component reads from localStorage or internal state to generate the report.
+  1823→  // For this implementation, we generate a demo report based on typical values.
+  1824→  const generateReport = useCallback(() => {
+  1825→    const now = new Date();
+  1826→    const dateStr = now.toLocaleString('zh-CN', { dateStyle: 'full', timeStyle: 'short' });
+  1827→
+  1828→    // Sample batch data for the report
+  1829→    const sampleBatch: DeltaEBatchEntry[] = [];
+  1830→    const sampleColors = [
+  1831→      { r: 0.8, g: 0.4, b: 0.2, tr: 0.78, tg: 0.41, tb: 0.21 },
+  1832→      { r: 0.2, g: 0.7, b: 0.5, tr: 0.19, tg: 0.72, tb: 0.49 },
+  1833→      { r: 0.9, g: 0.1, b: 0.1, tr: 0.88, tg: 0.11, tb: 0.12 },
+  1834→      { r: 0.1, g: 0.9, b: 0.3, tr: 0.11, tg: 0.89, tb: 0.29 },
+  1835→      { r: 0.5, g: 0.5, b: 0.5, tr: 0.50, tg: 0.50, tb: 0.50 },
+  1836→    ];
+  1837→
+  1838→    sampleColors.forEach((sc, i) => {
+  1839→      const xyz1 = rgbToXYZ(sc.r, sc.g, sc.b, 'sRGB', 'sRGB');
+  1840→      const xyz2 = rgbToXYZ(sc.tr, sc.tg, sc.tb, 'sRGB', 'sRGB');
+  1841→      const lab1 = xyzToLab(xyz1.X, xyz1.Y, xyz1.Z);
+  1842→      const lab2 = xyzToLab(xyz2.X, xyz2.Y, xyz2.Z);
+  1843→      const de = deltaE2000(lab1, lab2);
+  1844→      sampleBatch.push({
+  1845→        id: i,
+  1846→        refR: sc.r,
+  1847→        refG: sc.g,
+  1848→        refB: sc.b,
+  1849→        testR: sc.tr,
+  1850→        testG: sc.tg,
+  1851→        testB: sc.tb,
+  1852→        deltaE: de,
+  1853→        method: '2000',
+  1854→        lab1,
+  1855→        lab2,
+  1856→        interpretation: interpretDeltaE(de),
+  1857→      } as DeltaEBatchEntry);
+  1858→    });
+  1859→
+  1860→    const dEValues = sampleBatch.map((e) => e.deltaE);
+  1861→    const stats = deltaEStatistics(dEValues);
+  1862→
+  1863→    const lines: string[] = [];
+  1864→    lines.push('=== Color Pipeline Report ===');
+  1865→    lines.push(`Generated: ${dateStr}`);
+  1866→    lines.push('');
+  1867→    lines.push('--- Configuration ---');
+  1868→    lines.push(`  Source: sRGB + sRGB`);
+  1869→    lines.push(`  Target: DCI-P3 + sRGB`);
+  1870→    lines.push(`  LUT Size: 33x33x33`);
+  1871→    lines.push(`  Interpolation: Trilinear`);
+  1872→    lines.push('');
+  1873→    lines.push('--- Gamut Coverage ---');
+  1874→    lines.push(`  sRGB → DCI-P3 Coverage: ~25% of P3 outside sRGB`);
+  1875→    lines.push(`  Primary R: (0.640, 0.330) → (0.680, 0.320) Δu'v' = 0.018`);
+  1876→    lines.push(`  Primary G: (0.300, 0.600) → (0.265, 0.690) Δu'v' = 0.031`);
+  1877→    lines.push(`  Primary B: (0.150, 0.060) → (0.150, 0.060) Δu'v' = 0.000`);
+  1878→    lines.push('');
+  1879→    lines.push('--- Color Difference Analysis ---');
+  1880→    lines.push(`  Method: ΔE2000 (CIEDE2000)`);
+  1881→    lines.push(`  Mean ΔE: ${stats.mean.toFixed(4)}`);
+  1882→    lines.push(`  Max ΔE:  ${stats.max.toFixed(4)}`);
+  1883→    lines.push(`  Min ΔE:  ${stats.min.toFixed(4)}`);
+  1884→    lines.push(`  Std Dev: ${stats.stdDev.toFixed(4)}`);
+  1885→    lines.push(`  P95 ΔE:  ${stats.p95.toFixed(4)}`);
+  1886→    lines.push(`  P99 ΔE:  ${stats.p99.toFixed(4)}`);
+  1887→    lines.push(`  Samples: ${sampleBatch.length}`);
+  1888→    lines.push('');
+  1889→    lines.push('--- Individual Measurements ---');
+  1890→    sampleBatch.forEach((entry, i) => {
+  1891→      lines.push(
+  1892→        `  #${i + 1}: (${entry.refR.toFixed(2)},${entry.refG.toFixed(2)},${entry.refB.toFixed(2)}) → ` +
+  1893→        `(${entry.testR.toFixed(2)},${entry.testG.toFixed(2)},${entry.testB.toFixed(2)}) ` +
+  1894→        `ΔE=${entry.deltaE.toFixed(4)} [${entry.interpretation.level}]`
+  1895→      );
+  1896→    });
+  1897→    lines.push('');
+  1898→    lines.push('--- Transfer Function Info ---');
+  1899→    lines.push('  Source TF: sRGB (~gamma 2.2 with linear segment)');
+  1900→    lines.push('  Target TF: sRGB (~gamma 2.2 with linear segment)');
+  1901→    lines.push('  Note: Same transfer function, gamut conversion only');
+  1902→    lines.push('');
+  1903→    lines.push('=== End of Report ===');
+  1904→
+  1905→    setReport(lines.join('\n'));
+  1906→  }, []);
+  1907→
+  1908→  const handleCopy = useCallback(async () => {
+  1909→    try {
+  1910→      await navigator.clipboard.writeText(report);
+  1911→      setCopied(true);
+  1912→      setTimeout(() => setCopied(false), 2000);
+  1913→    } catch {
+  1914→      // Fallback
+  1915→      const textarea = document.createElement('textarea');
+  1916→      textarea.value = report;
+  1917→      document.body.appendChild(textarea);
+  1918→      textarea.select();
+  1919→      document.execCommand('copy');
+  1920→      document.body.removeChild(textarea);
+  1921→      setCopied(true);
+  1922→      setTimeout(() => setCopied(false), 2000);
+  1923→    }
+  1924→  }, [report]);
+  1925→
+  1926→  const handleDownload = useCallback(() => {
+  1927→    if (!report) return;
+  1928→    const blob = new Blob([report], { type: 'text/plain;charset=utf-8' });
+  1929→    const url = URL.createObjectURL(blob);
+  1930→    const a = document.createElement('a');
+  1931→    a.href = url;
+  1932→    a.download = `color_pipeline_report_${new Date().toISOString().slice(0, 10)}.txt`;
+  1933→    a.click();
+  1934→    URL.revokeObjectURL(url);
+  1935→  }, [report]);
+  1936→
+  1937→  return (
+  1938→    <div className="space-y-4">
+  1939→      <Card>
+  1940→        <CardHeader className="pb-3">
+  1941→          <CardTitle className="text-base">结果报告</CardTitle>
+  1942→          <CardDescription>生成当前色彩管线的配置摘要和误差分析报告</CardDescription>
+  1943→        </CardHeader>
+  1944→        <CardContent className="space-y-4">
+  1945→          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+  1946→            <Card className="bg-muted/30">
+  1947→              <CardContent className="p-3 text-center">
+  1948→                <p className="text-[10px] text-muted-foreground">源色域</p>
+  1949→                <p className="text-sm font-semibold">sRGB</p>
+  1950→                <p className="text-[10px] text-muted-foreground">+ sRGB TF</p>
+  1951→              </CardContent>
+  1952→            </Card>
+  1953→            <Card className="bg-muted/30 flex items-center justify-center">
+  1954→              <CardContent className="p-3 text-center">
+  1955→                <span className="text-xl">→</span>
+  1956→              </CardContent>
+  1957→            </Card>
+  1958→            <Card className="bg-muted/30">
+  1959→              <CardContent className="p-3 text-center">
+  1960→                <p className="text-[10px] text-muted-foreground">目标色域</p>
+  1961→                <p className="text-sm font-semibold">DCI-P3</p>
+  1962→                <p className="text-[10px] text-muted-foreground">+ sRGB TF</p>
+  1963→              </CardContent>
+  1964→            </Card>
+  1965→          </div>
+  1966→
+  1967→          <Button onClick={generateReport} className="gap-1">
+  1968→            <FileText className="h-3.5 w-3.5" />
+  1969→            生成报告
+  1970→          </Button>
+  1971→        </CardContent>
+  1972→      </Card>
+  1973→
+  1974→      {report && (
+  1975→        <Card>
+  1976→          <CardHeader className="pb-2">
+  1977→            <div className="flex items-center justify-between">
+  1978→              <CardTitle className="text-sm">报告内容</CardTitle>
+  1979→              <div className="flex gap-2">
+  1980→                <Button size="sm" variant="outline" onClick={handleCopy} className="gap-1 h-7 text-xs">
+  1981→                  <Copy className="h-3 w-3" />
+  1982→                  {copied ? '已复制' : '复制'}
+  1983→                </Button>
+  1984→                <Button size="sm" variant="outline" onClick={handleDownload} className="gap-1 h-7 text-xs">
+  1985→                  <Download className="h-3 w-3" />
+  1986→                  下载
+  1987→                </Button>
+  1988→              </div>
+  1989→            </div>
+  1990→          </CardHeader>
+  1991→          <CardContent>
+  1992→            <Textarea
+  1993→              value={report}
+  1994→              readOnly
+  1995→              rows={24}
+  1996→              className="font-mono text-xs resize-y"
+  1997→            />
+  1998→          </CardContent>
+  1999→        </Card>
+  2000→      )}
+
+[showing lines 1-2000 of 2004; use offset=2001 with limit to continue reading]

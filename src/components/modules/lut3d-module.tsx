@@ -235,8 +235,10 @@ export default function Lut3dModule() {
   const [deleteConfirmName, setDeleteConfirmName] = useState('');
 
   // ─── Tab: Chromaticity Upsampling state ───
-  const [xyLvData5, setXyLvData5] = useState<Float32Array | null>(null); // 125*6 = 750 floats: R,G,B,x,y,Lv per row
-  const [xyLvUpData17, setXyLvUpData17] = useState<Float32Array | null>(null); // 4913*6 floats
+  const [xyLvInputSize, setXyLvInputSize] = useState<number>(5); // 输入网格尺寸 (3/5/9/17)
+  const [xyLvTargetSize, setXyLvTargetSize] = useState<number>(17); // 上采样目标尺寸 (9/17/33/65)
+  const [xyLvData, setXyLvData] = useState<Float32Array | null>(null); // size³*6 floats: R,G,B,x,y,Lv per row
+  const [xyLvUpData, setXyLvUpData] = useState<Float32Array | null>(null); // targetSize³*6 floats
   const [xyLvGamut, setXyLvGamut] = useState('sRGB');
   const [xyLvTF, setXyLvTF] = useState<TransferFunctionName>('sRGB');
   const [xyLvImportText, setXyLvImportText] = useState('');
@@ -765,15 +767,18 @@ export default function Lut3dModule() {
 
   const handleXyLvParse = useCallback(() => {
     setXyLvParseError('');
-    setXyLvData5(null);
+    setXyLvData(null);
+    setXyLvUpData(null);
     try {
+      const size = xyLvInputSize;
+      const total = size * size * size;
       const lines = xyLvImportText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-      if (lines.length !== 125) {
-        setXyLvParseError(`需要 125 行 (5³)，实际 ${lines.length} 行`);
+      if (lines.length !== total) {
+        setXyLvParseError(`需要 ${total} 行 (${size}³)，实际 ${lines.length} 行`);
         return;
       }
-      const data = new Float32Array(125 * 6);
-      for (let i = 0; i < 125; i++) {
+      const data = new Float32Array(total * 6);
+      for (let i = 0; i < total; i++) {
         const parts = lines[i].split(/[,\s]+/).map(Number);
         if (parts.length < 6 || parts.some(p => isNaN(p))) {
           setXyLvParseError(`第 ${i + 1} 行格式错误：需要 6 个数值 (R,G,B,x,y,Lv)`);
@@ -786,46 +791,47 @@ export default function Lut3dModule() {
         data[i * 6 + 4] = parts[4]; // y
         data[i * 6 + 5] = parts[5]; // Lv
       }
-      setXyLvData5(data);
-      setXyLvUpData17(null);
+      setXyLvData(data);
     } catch (err) {
       setXyLvParseError(err instanceof Error ? err.message : '解析失败');
     }
-  }, [xyLvImportText]);
+  }, [xyLvImportText, xyLvInputSize]);
 
   const handleXyLvUpsample = useCallback(() => {
-    if (!xyLvData5 || isXyLvUpsampling) return;
+    if (!xyLvData || isXyLvUpsampling) return;
     setIsXyLvUpsampling(true);
+    const inputSize = xyLvInputSize;
+    const targetSize = xyLvTargetSize;
+    const inputTotal = inputSize * inputSize * inputSize;
+    const targetTotal = targetSize * targetSize * targetSize;
     requestAnimationFrame(() => {
       setTimeout(() => {
         try {
           // ── Step 1: Detect the scale of R, G, B values ──
           let maxRGB = 0;
-          for (let i = 0; i < 125; i++) {
-            maxRGB = Math.max(maxRGB, xyLvData5[i * 6 + 0], xyLvData5[i * 6 + 1], xyLvData5[i * 6 + 2]);
+          for (let i = 0; i < inputTotal; i++) {
+            maxRGB = Math.max(maxRGB, xyLvData[i * 6 + 0], xyLvData[i * 6 + 1], xyLvData[i * 6 + 2]);
           }
 
-          // Map an R/G/B value to a 5³ grid index (0-4)
-          // For 8-bit data (0-255): 0→0, 64→1, 128→2, 192→3, 255→4
-          // For normalized data (0-1): 0→0, 0.25→1, 0.5→2, 0.75→3, 1.0→4
+          // Map an R/G/B value to an inputSize³ grid index (0 to inputSize-1)
+          const gridMax = inputSize - 1;
           const toGridIdx = (val: number): number => {
             if (maxRGB <= 1) {
-              return Math.round(val * 4);
+              return Math.round(val * gridMax);
             } else {
-              return Math.round(val * 4 / maxRGB);
+              return Math.round(val * gridMax / maxRGB);
             }
           };
 
           // ── Step 2: Detect iteration order from first two rows ──
           // Standard .cube: R-innermost (R changes between row 0 and 1)
           // Some formats: B-innermost (B changes between row 0 and 1)
-          const r0 = xyLvData5[0], g0 = xyLvData5[1], b0 = xyLvData5[2];
-          const r1 = xyLvData5[6], g1 = xyLvData5[7], b1 = xyLvData5[8];
+          const r0 = xyLvData[0], g0 = xyLvData[1], b0 = xyLvData[2];
+          const r1 = xyLvData[6], g1 = xyLvData[7], b1 = xyLvData[8];
           // Check which channel changed between row 0 and row 1
           const rChanged = (r0 !== r1);
           const gChanged = (g0 !== g1);
           const bChanged = (b0 !== b1);
-          // The channel that changes between consecutive rows is the innermost loop variable
           // Determine loop order: [outermost, middle, innermost] using 0=R, 1=G, 2=B
           let loopOrder: [number, number, number];
           if (rChanged && !gChanged && !bChanged) {
@@ -842,17 +848,17 @@ export default function Lut3dModule() {
             loopOrder = [2, 1, 0];
           }
 
-          // ── Step 3: Build three 5³ LUTs for x, y, Lv channels ──
-          const makeLut5 = (channelOffset: number): LUT3D => {
-            const data = new Float32Array(125 * 3);
+          // ── Step 3: Build three inputSize³ LUTs for x, y, Lv channels ──
+          const makeLutN = (channelOffset: number): LUT3D => {
+            const data = new Float32Array(inputTotal * 3);
             data.fill(NaN);
-            for (let i = 0; i < 125; i++) {
-              const ri = clamp(toGridIdx(xyLvData5[i * 6 + 0]), 0, 4);
-              const gi = clamp(toGridIdx(xyLvData5[i * 6 + 1]), 0, 4);
-              const bi = clamp(toGridIdx(xyLvData5[i * 6 + 2]), 0, 4);
-              const val = xyLvData5[i * 6 + channelOffset];
-              // LUT3D internal storage: (bi * 25 + gi * 5 + ri) * 3
-              const idx = (bi * 5 * 5 + gi * 5 + ri) * 3;
+            for (let i = 0; i < inputTotal; i++) {
+              const ri = clamp(toGridIdx(xyLvData[i * 6 + 0]), 0, gridMax);
+              const gi = clamp(toGridIdx(xyLvData[i * 6 + 1]), 0, gridMax);
+              const bi = clamp(toGridIdx(xyLvData[i * 6 + 2]), 0, gridMax);
+              const val = xyLvData[i * 6 + channelOffset];
+              // LUT3D internal storage: (bi * inputSize² + gi * inputSize + ri) * 3
+              const idx = (bi * inputSize * inputSize + gi * inputSize + ri) * 3;
               data[idx + 0] = val;
               data[idx + 1] = val;
               data[idx + 2] = val;
@@ -863,40 +869,41 @@ export default function Lut3dModule() {
             }
             return {
               name: `xyLv ch${channelOffset}`,
-              size: 5,
+              size: inputSize,
               data,
               inputRange: { min: 0, max: 1 },
               outputRange: { min: 0, max: 1 },
             };
           };
 
-          const lutX = makeLut5(3);
-          const lutY = makeLut5(4);
-          const lutLv = makeLut5(5);
+          const lutX = makeLutN(3);
+          const lutY = makeLutN(4);
+          const lutLv = makeLutN(5);
 
-          // ── Step 4: Upsample each to 17³ ──
+          // ── Step 4: Upsample each to targetSize³ ──
           // x, y, Lv values are NOT normalized - they keep their original scale
-          const upX = upsampleLUT(lutX, 17);
-          const upY = upsampleLUT(lutY, 17);
-          const upLv = upsampleLUT(lutLv, 17);
+          const upX = upsampleLUT(lutX, targetSize);
+          const upY = upsampleLUT(lutY, targetSize);
+          const upLv = upsampleLUT(lutLv, targetSize);
 
-          // ── Step 5: Combine back into 17³ xyLv data ──
+          // ── Step 5: Combine back into targetSize³ xyLv data ──
           // Output in the same iteration order as the input data
-          const upData = new Float32Array(4913 * 6);
+          const upData = new Float32Array(targetTotal * 6);
+          const targetGridMax = targetSize - 1;
 
-          // Helper to compute R/G/B coordinate for a grid index (0-16)
+          // Helper to compute R/G/B coordinate for a grid index
           // Round to integer for bit-depth modes (8-bit, 10-bit, etc.)
           const coordVal = (idx: number): number => {
-            if (maxRGB <= 1) return idx / 16;
-            return Math.round((idx / 16) * maxRGB);
+            if (maxRGB <= 1) return idx / targetGridMax;
+            return Math.round((idx / targetGridMax) * maxRGB);
           };
 
           // Iterate in the detected loop order
           const [outer, mid, inner] = loopOrder;
           let outRow = 0;
-          for (let oi = 0; oi < 17; oi++) {
-            for (let mi = 0; mi < 17; mi++) {
-              for (let ii = 0; ii < 17; ii++) {
+          for (let oi = 0; oi < targetSize; oi++) {
+            for (let mi = 0; mi < targetSize; mi++) {
+              for (let ii = 0; ii < targetSize; ii++) {
                 // Map loop indices to R, G, B indices
                 const indices = [0, 0, 0];
                 indices[outer] = oi;
@@ -905,7 +912,7 @@ export default function Lut3dModule() {
                 const ri = indices[0], gi = indices[1], bi = indices[2];
 
                 // Access the LUT data (internal: B-outer, G-mid, R-inner)
-                const lutIdx = (bi * 17 * 17 + gi * 17 + ri) * 3;
+                const lutIdx = (bi * targetSize * targetSize + gi * targetSize + ri) * 3;
                 const outIdx = outRow * 6;
 
                 // R, G, B coordinates in original scale
@@ -921,18 +928,18 @@ export default function Lut3dModule() {
               }
             }
           }
-          setXyLvUpData17(upData);
+          setXyLvUpData(upData);
         } finally {
           setIsXyLvUpsampling(false);
         }
       }, 100);
     });
-  }, [xyLvData5, isXyLvUpsampling]);
+  }, [xyLvData, isXyLvUpsampling, xyLvInputSize, xyLvTargetSize]);
 
   const handleXyLvToRGB = useCallback(() => {
-    const srcData = xyLvUpData17 || xyLvData5;
+    const srcData = xyLvUpData || xyLvData;
     if (!srcData) return;
-    const size = srcData === xyLvUpData17 ? 17 : 5;
+    const size = srcData === xyLvUpData ? xyLvTargetSize : xyLvInputSize;
     const total = size * size * size;
 
     setXyLvConvertError('');
@@ -1019,12 +1026,12 @@ export default function Lut3dModule() {
       setXyLvConvertError(err instanceof Error ? err.message : '转换失败');
       setTimeout(() => setXyLvConvertError(''), 5000);
     }
-  }, [xyLvData5, xyLvUpData17, xyLvGamut, xyLvTF, addLUT]);
+  }, [xyLvData, xyLvUpData, xyLvGamut, xyLvTF, addLUT, xyLvInputSize, xyLvTargetSize]);
 
   const handleXyLvExport = useCallback(() => {
-    const srcData = xyLvUpData17 || xyLvData5;
+    const srcData = xyLvUpData || xyLvData;
     if (!srcData) return;
-    const size = srcData === xyLvUpData17 ? 17 : 5;
+    const size = srcData === xyLvUpData ? xyLvTargetSize : xyLvInputSize;
     const total = size * size * size;
     const lines: string[] = [];
     for (let i = 0; i < total; i++) {
@@ -1048,7 +1055,7 @@ export default function Lut3dModule() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [xyLvData5, xyLvUpData17]);
+  }, [xyLvData, xyLvUpData, xyLvInputSize, xyLvTargetSize]);
 
   // ──────────────────────────────────────────
   // Render helpers
@@ -2888,15 +2895,64 @@ export default function Lut3dModule() {
                   色度上采样 (xyLv)
                 </CardTitle>
                 <CardDescription>
-                  导入 5×5×5 RGB-xyLv 数据，上采样到 17³，转换为 RGB 3DLUT。
+                  导入 RGB-xyLv 网格数据，上采样到更高精度，转换为 RGB 3DLUT。
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4 max-h-[700px] overflow-y-auto">
+                {/* Grid size selection */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-medium">输入网格尺寸</Label>
+                    <Select value={String(xyLvInputSize)} onValueChange={(v) => {
+                      const n = parseInt(v, 10);
+                      setXyLvInputSize(n);
+                      setXyLvData(null);
+                      setXyLvUpData(null);
+                    }}>
+                      <SelectTrigger className="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="3">3³ (27 条目)</SelectItem>
+                        <SelectItem value="5">5³ (125 条目)</SelectItem>
+                        <SelectItem value="9">9³ (729 条目)</SelectItem>
+                        <SelectItem value="17">17³ (4,913 条目)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs font-medium">上采样目标尺寸</Label>
+                    <Select value={String(xyLvTargetSize)} onValueChange={(v) => {
+                      const n = parseInt(v, 10);
+                      setXyLvTargetSize(n);
+                      setXyLvUpData(null);
+                    }}>
+                      <SelectTrigger className="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="9">9³ (729 条目)</SelectItem>
+                        <SelectItem value="17">17³ (4,913 条目)</SelectItem>
+                        <SelectItem value="33">33³ (35,937 条目)</SelectItem>
+                        <SelectItem value="65">65³ (274,625 条目)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                {xyLvTargetSize <= xyLvInputSize && (
+                  <div className="flex items-center gap-2 p-2 rounded-lg text-xs bg-amber-50 border border-amber-200 text-amber-700">
+                    <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                    目标尺寸应大于输入尺寸，否则无需上采样
+                  </div>
+                )}
+
+                <Separator />
+
                 {/* Import section */}
                 <div className="space-y-3">
                   <Label className="text-sm font-medium">导入 xyLv 数据</Label>
                   <p className="text-xs text-muted-foreground">
-                    每行 6 个数值：R, G, B, x, y, Lv（逗号或空格分隔），共 125 行 (5³)
+                    每行 6 个数值：R, G, B, x, y, Lv（逗号或空格分隔），共 {xyLvInputSize * xyLvInputSize * xyLvInputSize} 行 ({xyLvInputSize}³)
                   </p>
                   <Textarea
                     value={xyLvImportText}
@@ -2941,8 +2997,8 @@ export default function Lut3dModule() {
                           const text = ev.target?.result as string;
                           setXyLvImportText(text);
                           setXyLvParseError('');
-                          setXyLvData5(null);
-                          setXyLvUpData17(null);
+                          setXyLvData(null);
+                          setXyLvUpData(null);
                         };
                         reader.readAsText(file);
                         e.target.value = '';
@@ -2963,23 +3019,24 @@ export default function Lut3dModule() {
                 <div className="space-y-2">
                   <Label className="text-sm font-medium">数据预览</Label>
                   <div className="max-h-48 overflow-y-auto rounded-md border">
-                    {xyLvData5 ? (
+                    {xyLvData ? (
                       <div className="p-3 space-y-1.5 text-xs bg-muted/20">
                         <div className="flex items-center gap-2">
                           <Check className="w-4 h-4 text-green-500" />
-                          <span className="font-medium text-green-700">5³ xyLv 数据已导入</span>
+                          <span className="font-medium text-green-700">{xyLvInputSize}³ xyLv 数据已导入</span>
                         </div>
                         <div className="text-muted-foreground">
-                          <span>125 行 × 6 列 (R,G,B,x,y,Lv)</span>
+                          <span>{xyLvInputSize * xyLvInputSize * xyLvInputSize} 行 × 6 列 (R,G,B,x,y,Lv)</span>
                         </div>
                         {(() => {
+                          const total = xyLvInputSize * xyLvInputSize * xyLvInputSize;
                           let minX = Infinity, maxX = -Infinity;
                           let minY = Infinity, maxY = -Infinity;
                           let minLv = Infinity, maxLv = -Infinity;
-                          for (let i = 0; i < 125; i++) {
-                            const xv = xyLvData5[i * 6 + 3];
-                            const yv = xyLvData5[i * 6 + 4];
-                            const lv = xyLvData5[i * 6 + 5];
+                          for (let i = 0; i < total; i++) {
+                            const xv = xyLvData[i * 6 + 3];
+                            const yv = xyLvData[i * 6 + 4];
+                            const lv = xyLvData[i * 6 + 5];
                             if (xv < minX) minX = xv; if (xv > maxX) maxX = xv;
                             if (yv < minY) minY = yv; if (yv > maxY) maxY = yv;
                             if (lv < minLv) minLv = lv; if (lv > maxLv) maxLv = lv;
@@ -3002,13 +3059,13 @@ export default function Lut3dModule() {
                     ) : (
                       <div className="p-3 text-xs text-muted-foreground">尚未导入数据</div>
                     )}
-                    {xyLvUpData17 && (
+                    {xyLvUpData && (
                       <div className="p-3 space-y-1 text-xs bg-green-50 border-t border-green-200">
                         <div className="flex items-center gap-2 text-green-700">
                           <Check className="w-4 h-4" />
-                          <span className="font-medium">17³ 上采样数据已就绪</span>
+                          <span className="font-medium">{xyLvTargetSize}³ 上采样数据已就绪</span>
                         </div>
-                        <span className="text-muted-foreground">4,913 行 × 6 列</span>
+                        <span className="text-muted-foreground">{xyLvTargetSize * xyLvTargetSize * xyLvTargetSize.toLocaleString()} 行 × 6 列</span>
                       </div>
                     )}
                   </div>
@@ -3022,7 +3079,7 @@ export default function Lut3dModule() {
                   <div className="flex items-center gap-3">
                     <Button
                       onClick={handleXyLvUpsample}
-                      disabled={!xyLvData5 || isXyLvUpsampling}
+                      disabled={!xyLvData || isXyLvUpsampling || xyLvTargetSize <= xyLvInputSize}
                       size="sm"
                       className="gap-2"
                     >
@@ -3034,7 +3091,7 @@ export default function Lut3dModule() {
                       ) : (
                         <>
                           <Expand className="w-4 h-4" />
-                          5³ → 17³ 上采样
+                          {xyLvInputSize}³ → {xyLvTargetSize}³ 上采样
                         </>
                       )}
                     </Button>
@@ -3093,7 +3150,7 @@ export default function Lut3dModule() {
                   </div>
                   <Button
                     onClick={handleXyLvToRGB}
-                    disabled={!xyLvUpData17}
+                    disabled={!xyLvUpData && !xyLvData}
                     className="w-full gap-2"
                   >
                     {xyLvConvertSuccess ? (
@@ -3121,7 +3178,7 @@ export default function Lut3dModule() {
                     </div>
                   )}
                   <p className="text-[10px] text-muted-foreground">
-                    将使用 17³ 上采样数据进行转换
+                    将使用 {xyLvUpData ? `${xyLvTargetSize}³ 上采样` : `${xyLvInputSize}³ 原始`}数据进行转换
                   </p>
                 </div>
 
@@ -3132,7 +3189,7 @@ export default function Lut3dModule() {
                   <Label className="text-sm font-medium">导出 xyLv 数据</Label>
                   <Button
                     onClick={handleXyLvExport}
-                    disabled={!xyLvData5 && !xyLvUpData17}
+                    disabled={!xyLvData && !xyLvUpData}
                     variant="secondary"
                     className="w-full gap-2"
                   >
@@ -3153,11 +3210,15 @@ export default function Lut3dModule() {
                     说明
                   </div>
                   <p className="text-muted-foreground">
-                    色度上采样用于将稀疏的 5³ xyLv 色度数据通过三线性插值扩展为 17³ 密集数据，
+                    色度上采样用于将稀疏的 xyLv 色度数据通过三线性插值扩展为更密集的数据，
                     再通过 xyY→RGB 转换生成可用的 3DLUT 查找表。
                   </p>
                   <p className="text-muted-foreground">
                     输入数据格式：R,G,B 为输入网格坐标 (0-1)，x,y 为 CIE 色度坐标，Lv 为亮度 (0-1)。
+                  </p>
+                  <p className="text-muted-foreground">
+                    支持的输入网格尺寸：3³ (27) / 5³ (125) / 9³ (729) / 17³ (4,913)；
+                    上采样目标：9³ / 17³ / 33³ / 65³。
                   </p>
                 </div>
               </CardContent>

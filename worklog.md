@@ -23,3 +23,22 @@ Stage Summary:
 - 所有导出位置现在支持格式选择（PNG/JPEG/WebP/TIFF 8-bit/TIFF 16-bit/BMP）
 - 新建文件：3个
 - 修改文件：6个
+
+---
+Task ID: rgb-sim-fix
+Agent: Main Agent
+Task: 修复生产环境"仿真与验证 → RGB 仿真"点击后显示 "This page couldn't load" 的崩溃问题
+
+Work Log:
+- 复现：本地启动 standalone 生产服务器 (bun .next/standalone/server.js)，用 agent-browser 模拟用户点击 "仿真与验证" → "RGB 仿真" tab，成功复现 "Application error: a client-side exception has occurred"
+- 切到 dev 模式 (next dev) 同样的操作路径，拿到详细错误：`Runtime ReferenceError: patternExportFormat is not defined @ src/components/modules/simulation-module.tsx (914:44) @ RGBSimulationTab`
+- 定位根因：在 2026-06-15 的多格式导出重构中，`const [patternExportFormat, setPatternExportFormat] = useState<ExportImageFormat>('png')` 这行被错误地放进了 `ImageSimulationTab` 函数 (line 215)，但它的所有使用点 (line 905/914/988) 都在 `RGBSimulationTab` 函数里 —— 跨函数作用域引用未定义变量
+- 为何 dev 没暴露：dev 模式下有 React 错误覆盖层，用户能看到具体报错；生产模式只有通用错误页 "This page couldn't load. Reload to try again, or go back."，看起来像路由/构建问题但其实是组件运行时错误
+- 修复：把 `patternExportFormat` 的 useState 声明从 `ImageSimulationTab` 删除，移到 `RGBSimulationTab` 内（紧跟在 `patternSrc` 状态之后）
+- 验证：重新 `next build` + 启动 standalone 生产服务器，agent-browser 点击 "RGB 仿真" tab → 正常渲染出图案类型/分辨率/生成/导出格式/下载控件；点击"生成"按钮 → 下载按钮变 enabled，确认图案生成成功；errors 命令无报错
+
+Stage Summary:
+- 根因：变量作用域错位（state 声明放错了函数体）
+- 修复文件：src/components/modules/simulation-module.tsx
+- 验证方式：dev 模式拿到 ReferenceError 详细堆栈 → 修复 → 生产模式 agent-browser 端到端验证通过
+- 教训：生产模式的 "This page couldn't load" 不一定是构建/路由问题，遇到时优先用 dev 模式复现拿详细错误
